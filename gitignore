@@ -1,0 +1,32 @@
+# Secrets — never commit these
+*.env
+env
+secrets
+*.key
+*.pem
+*.crt
+
+# Sync manifest (contains local file paths and IDs — machine-specific)
+.nc-sync-manifest*.json
+nc-sync-manifest*.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
