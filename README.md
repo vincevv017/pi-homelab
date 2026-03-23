@@ -13,8 +13,8 @@
 [![Tailscale](https://img.shields.io/badge/network-Tailscale-232f3e?style=flat-square)](https://tailscale.com/)
 [![Mullvad VPN](https://img.shields.io/badge/VPN-Mullvad-44ad8e?style=flat-square)](https://mullvad.net/)
 [![Nextcloud](https://img.shields.io/badge/cloud-Nextcloud-0082C9?style=flat-square&logo=nextcloud&logoColor=white)](https://nextcloud.com/)
-[![Ollama](https://img.shields.io/badge/LLM-Ollama-black?style=flat-square)](https://ollama.com/)
-[![Open WebUI](https://img.shields.io/badge/UI-Open%20WebUI-grey?style=flat-square)](https://openwebui.com/)
+[![Ollama](https://img.shields.io/badge/LLM-Ollama-black?style=flat-square&logo=ollama&logoColor=white)](https://ollama.com/)
+[![Open WebUI](https://img.shields.io/badge/UI-Open%20WebUI-343541?style=flat-square&logo=openai&logoColor=white)](https://openwebui.com/)
 [![Docker](https://img.shields.io/badge/containers-Docker-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com/)
 
 <br/>
@@ -160,7 +160,7 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 ---
 
-## Open WebUI
+## <img src="https://cdn.simpleicons.org/ollama/000000" height="22" align="center" /> Open WebUI
 
 <!-- ═══════════════════════════════════════════════════════════
      OPEN WEBUI SCREENSHOT — browser capture of the interface

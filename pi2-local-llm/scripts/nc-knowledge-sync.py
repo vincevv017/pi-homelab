@@ -43,7 +43,7 @@ Usage:
 API key: Open WebUI → Admin Panel → enable API Keys + Default Permissions →
          then Settings → Account → API Keys → Create
 
-Author: Part of the Raspberry Pi local LLM stack (github.com/YOUR_GITHUB_USERNAME/YOUR_REPO)
+Author: Vincent Vikor Part of the Raspberry Pi local LLM stack (https://github.com/vincevv017/pi-homelab)
 """
 
 import argparse
