@@ -10,8 +10,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi%205-c51a4a?style=flat-square&logo=raspberrypi&logoColor=white)](https://www.raspberrypi.com/)
-[![Tailscale](https://img.shields.io/badge/network-Tailscale-232f3e?style=flat-square)](https://tailscale.com/)
-[![Mullvad VPN](https://img.shields.io/badge/VPN-Mullvad-44ad8e?style=flat-square)](https://mullvad.net/)
+[![Tailscale](https://img.shields.io/badge/network-Tailscale-232f3e?style=flat-square&logo=tailscale&logoColor=white)](https://tailscale.com/)
+[![Mullvad VPN](https://img.shields.io/badge/VPN-Mullvad-44ad8e?style=flat-square&logo=mullvad&logoColor=white)](https://mullvad.net/)
 [![Nextcloud](https://img.shields.io/badge/cloud-Nextcloud-0082C9?style=flat-square&logo=nextcloud&logoColor=white)](https://nextcloud.com/)
 [![Ollama](https://img.shields.io/badge/LLM-Ollama-black?style=flat-square&logo=ollama&logoColor=white)](https://ollama.com/)
 [![Open WebUI](https://img.shields.io/badge/UI-Open%20WebUI-343541?style=flat-square&logo=openai&logoColor=white)](https://openwebui.com/)
