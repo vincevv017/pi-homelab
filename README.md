@@ -54,28 +54,28 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
      ┌─────┴──────────────────────────────────────────┐
      │              Raspberry Pi 1                    │
      │         VPN Exit Node & Personal Cloud         │
-     │         LAN: 192.168.1.50 / NVMe              │
-     │                                               │
-     │  ┌──────────────┐   ┌────────────────────┐   │
-     │  │  Mullvad VPN │   │     Nextcloud       │   │
-     │  │  Swiss exit  │   │  Nginx · MariaDB    │   │
-     │  │  nft watchdog│   │  Docker · TLS       │   │
-     │  └──────────────┘   └────────────────────┘   │
+     │         LAN: 192.168.1.50 / NVMe               │
+     │                                                │
+     │  ┌──────────────┐   ┌────────────────────┐     │
+     │  │  Mullvad VPN │   │     Nextcloud      │     │
+     │  │  Swiss exit  │   │  Nginx · MariaDB   │     │
+     │  │  nft watchdog│   │  Docker · TLS      │     │
+     │  └──────────────┘   └────────────────────┘     │
      └─────────────────────────┬──────────────────────┘
                                │  WebDAV over Tailscale
                                │
      ┌─────────────────────────┴──────────────────────┐
      │              Raspberry Pi 2                    │
      │             Local LLM Node                     │
-     │         LAN: 192.168.1.52 / NVMe              │
-     │                                               │
-     │  ┌──────────────┐   ┌────────────────────┐   │
-     │  │    Ollama    │   │    Open WebUI       │   │
-     │  │  llama3.2:3b │   │  Nginx · Docker    │   │
-     │  │  mistral:7b  │   │  TLS · RAG KB      │   │
-     │  │  qwen2.5:7b  │   └────────────────────┘   │
-     │  └──────────────┘                             │
-     │  /mnt/nextcloud ←── davfs2 + nc-sync.py       │
+     │         LAN: 192.168.1.52 / NVMe               │
+     │                                                │
+     │  ┌──────────────┐   ┌────────────────────┐     │
+     │  │    Ollama    │   │    Open WebUI      │     │
+     │  │  llama3.2:3b │   │  Nginx · Docker    │     │
+     │  │  mistral:7b  │   │  TLS · RAG KB      │     │
+     │  │  qwen2.5:7b  │   └────────────────────┘     │
+     │  └──────────────┘                              │
+     │  /mnt/nextcloud ←── davfs2 + nc-sync.py        │
      └────────────────────────────────────────────────┘
 ```
 
