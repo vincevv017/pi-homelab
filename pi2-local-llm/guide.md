@@ -997,6 +997,8 @@ ollama list
 
 **Updating Open WebUI:**
 
+> `apt full-upgrade` does not update Open WebUI — it only updates OS packages. To update Open WebUI, use `docker compose pull` below.
+
 ```bash
 cd ~/openwebui
 docker compose pull

@@ -1363,7 +1363,8 @@ docker compose up -d
 docker image prune -f
 ```
 
-After a NextCloud update, check for required database migrations:
+After a NextCloud update (i.e. after `docker compose pull` — not after `apt full-upgrade`,
+which only updates OS packages and does not touch Nextcloud), check for required database migrations:
 
 ```bash
 docker exec -u www-data nextcloud-nextcloud-1 php occ upgrade
