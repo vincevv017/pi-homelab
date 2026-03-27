@@ -834,14 +834,14 @@ sudo ip route get 8.8.8.8 from 100.y.y.y iif tailscale0
 
 ```
 ┌──────────┐     Tailscale      ┌──────────────────────────┐     WireGuard     ┌──────────┐
-│  iPhone   │ ──── encrypted ──→ │     Raspberry Pi 5       │ ──── encrypted ──→│ Mullvad  │
-│  iPad     │     tunnel         │                          │     tunnel        │ Server   │
-│  Mac      │ ←──────────────── │  tailscale0 → wg0-mullvad│ ←──────────────── │ Zurich   │
-└──────────┘                    │                          │                    └──────────┘
+│  iPhone  │ ──── encrypted ──→ │     Raspberry Pi 5       │ ──── encrypted ──→│ Mullvad  │
+│  iPad    │     tunnel         │                          │     tunnel        │ Server   │
+│  Mac     │ ←────────────────  │  tailscale0 → wg0-mullvad│ ←──────────────── │ Zurich   │
+└──────────┘                    │                          │                   └──────────┘
      │                          │  Docker:                 │
-     │   NextCloud access       │  ├─ Nginx (443)         │
-     └──── via Tailscale ──────→│  ├─ NextCloud (8080)    │
-                                │  └─ MariaDB             │
+     │   NextCloud access       │  ├─ Nginx (443)          │
+     └──── via Tailscale ──────→│  ├─ NextCloud (8080)     │
+                                │  └─ MariaDB              │
                                 └──────────────────────────┘
                                          │
                                     192.168.1.50

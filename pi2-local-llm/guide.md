@@ -908,14 +908,14 @@ journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
 
 ```
 ┌──────────┐    Tailscale     ┌──────────────────────────────────┐
-│  iPhone   │ ── encrypted ──→│         Raspberry Pi 2            │
-│  iPad     │                 │         (192.168.1.52)            │
-│  Mac      │ ←────────────── │                                  │
+│  iPhone  │  ── encrypted ──→│         Raspberry Pi 2           │
+│  iPad    │                  │         (192.168.1.52)           │
+│  Mac     │  ←────────────── │                                  │
 └──────────┘                  │  Docker:                         │
                               │  ├─ Nginx (443)                  │
                               │  └─ Open WebUI (8080)            │
                               │       ↑                          │
-                              │       │ REST API (upload + index) │
+                              │       │ REST API (upload + index)│
                               │       │                          │
                               │  Host:                           │
                               │  ├─ Ollama (11434)               │
@@ -928,7 +928,7 @@ journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
                                    WebDAV over Tailscale
                                           │
                               ┌──────────────────────────────────┐
-                              │         Raspberry Pi 1            │
+                              │         Raspberry Pi 1           │
                               │  └─ Nextcloud                    │
                               └──────────────────────────────────┘
 ```
