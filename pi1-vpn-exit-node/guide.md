@@ -1,8 +1,8 @@
 # Raspberry Pi 5 — Secure VPN Exit Node & Personal Cloud
 
-Complete guide for building a private VPN exit node and self-hosted cloud storage on a Raspberry Pi 5 with NVMe boot, routing all your devices through Mullvad VPN via Tailscale mesh network, and running NextCloud for personal file sync.
+Complete guide for building a self-hosted VPN exit node and personal cloud storage on a Raspberry Pi 5 with NVMe boot, routing all your devices through Mullvad VPN via a Tailscale mesh network, and running Nextcloud for file sync and storage.
 
-**Result:** All your iOS/macOS devices route through a Swiss (or any country) VPN exit IP from anywhere in the world, with encrypted DNS, no logs, and zero port forwarding required. Plus a private NextCloud instance accessible from all your devices via Tailscale — your own OneDrive/iCloud replacement.
+**Result:** All your iOS/macOS devices route internet traffic through a controlled exit point on infrastructure you own, with encrypted DNS and zero port forwarding required. Plus a private Nextcloud instance accessible from all your devices via Tailscale — your own alternative to OneDrive, iCloud, or Google Drive, with data that never leaves your network.
 
 ## Key Concepts
 
@@ -23,19 +23,17 @@ Complete guide for building a private VPN exit node and self-hosted cloud storag
 > # e.g. → vpi5.your-tailnet.ts.net
 > ```
 
-**What is a VPN?** A VPN (Virtual Private Network) creates an encrypted tunnel between your device and a remote server. All your internet traffic flows through this tunnel, so your ISP, WiFi operator, or anyone monitoring the network only sees encrypted data going to the VPN server — not which websites you visit or what data you send. The website you're visiting sees the VPN server's IP address instead of yours, protecting your identity and location.
+**What is WireGuard?** WireGuard is the VPN protocol underlying both Tailscale and Mullvad. It establishes encrypted tunnels between endpoints using modern cryptography. Compared to older protocols like OpenVPN or IPSec, WireGuard is significantly faster, simpler to audit, and has a minimal codebase that reduces attack surface.
 
-**What is an exit node?** An exit node is the point where your traffic leaves the encrypted tunnel and enters the regular internet. In this setup, the Raspberry Pi acts as a Tailscale exit node: your iPhone sends traffic to the Pi through Tailscale's encrypted mesh, and the Pi forwards it out through Mullvad VPN. The "exit" to the internet happens at Mullvad's server in Zurich (or whichever location you choose), so websites see a Swiss IP address.
+**What is Tailscale?** Tailscale is a mesh networking tool built on WireGuard. It creates a persistent private network between your devices — phone, laptop, Pi — that works transparently across any network: home, office, or remote. Each device receives a stable IP in the `100.x.x.x` range and can reach any other device on your Tailscale network with end-to-end encryption, without requiring port forwarding or changes to your router configuration.
 
-**What is Tailscale?** Tailscale is a mesh networking tool built on WireGuard. It creates a private network between your devices (phone, laptop, Pi) that works anywhere — at home, on public WiFi, or abroad — without opening ports on your router. Each device gets a stable IP (like `100.x.x.x`) and can reach any other device on your Tailscale network, encrypted end-to-end.
+**What is an exit node?** An exit node is a Tailscale device through which other devices can route their outbound internet traffic. When a client device selects the Pi as its exit node, all internet-bound traffic is tunnelled to the Pi first, then forwarded onward. This gives you a consistent, controlled egress point regardless of where the client device is physically located — useful for maintaining predictable network behaviour across locations and enforcing a uniform outbound path for all your devices.
 
-**What is Mullvad VPN?** Mullvad is a privacy-focused VPN provider based in Sweden. They accept anonymous payments, keep no logs, and use the WireGuard protocol for speed and security. In this setup, Mullvad provides the "last mile" — the encrypted tunnel from your Pi to the internet, with an exit IP in the country of your choice.
+**What is Mullvad VPN?** Mullvad is a VPN provider based in Sweden operating on the WireGuard protocol. In this setup, Mullvad handles the outbound leg from the Pi to the internet: traffic exits via Mullvad's infrastructure rather than directly through your home ISP, giving you a stable exit IP, an encrypted last-mile connection, and a clean separation between your home network and your outbound traffic. Mullvad operates on an account-number model with no personally identifying information required.
 
-**Why combine Tailscale + Mullvad?** Tailscale alone gives you secure remote access to your Pi but doesn't hide your IP from websites. Mullvad alone works great on a single device but requires separate subscriptions or configurations per device. By combining them, one Mullvad account on the Pi protects all your Tailscale-connected devices simultaneously, from anywhere in the world, with a single €5/month subscription.
+**Why combine Tailscale + Mullvad?** Tailscale alone gives you secure, encrypted access to your Pi from anywhere, but your internet traffic still exits via your home ISP. Mullvad alone works on one device at a time and requires per-device configuration. Combined: a single Mullvad subscription on the Pi covers all your Tailscale-connected devices simultaneously, traffic management is handled centrally at the infrastructure level rather than on each client, and the entire stack runs on hardware you control.
 
-**What is WireGuard?** WireGuard is the underlying VPN protocol used by both Tailscale and Mullvad. It's faster and simpler than older protocols like OpenVPN or IPSec, with strong modern cryptography and minimal attack surface.
-
-**What is DNS and why does it matter?** DNS (Domain Name System) translates domain names like `google.com` into IP addresses. Without VPN protection, your DNS queries are visible to your ISP, revealing every website you visit — even if the connection itself is encrypted (HTTPS). This setup routes all DNS through Mullvad's private DNS server (`10.64.0.1`), preventing DNS leaks.
+**What is DNS and why does it matter?** DNS (Domain Name System) translates domain names like `example.com` into IP addresses. DNS queries travel separately from page content and, without explicit routing, can bypass the VPN tunnel — revealing query patterns to whichever resolver receives them. This setup routes all DNS through Mullvad's resolver (`10.64.0.1`), keeping DNS traffic inside the encrypted path alongside the rest of your traffic.
 
 ---
 
@@ -50,7 +48,7 @@ Complete guide for building a private VPN exit node and self-hosted cloud storag
 | Case | Metal enclosure |
 | Power | Official 27W USB-C Power Supply |
 | SD Card | 64GB microSD (initial setup only) |
-| Network | Ethernet cable + Orange Livebox 5 (fiber) |
+| Network | Ethernet cable + Internet router (fiber) |
 
 **Why NVMe over SD?** 10x faster read/write, far more reliable under constant workloads, 256GB capacity, and better suited for running services like VPN routing and Docker.
 
@@ -113,11 +111,11 @@ sudo reboot
 
 Reconnect after reboot: `ssh username@vpi5.local`
 
-### 1.5 Assign a Static IP on the Livebox 5
+### 1.5 Assign a Static IP on Your Router
 
-Before going further, assign the Pi a fixed IP on your LAN. Without this, the Livebox can hand it a different IP after a reboot or DHCP lease expiry — breaking SSH connections, firewall rules, and any service that references `192.168.1.50` directly.
+Before going further, assign the Pi a fixed IP on your LAN. Without this, the router can hand it a different IP after a reboot or DHCP lease expiry — breaking SSH connections, firewall rules, and any service that references `192.168.1.50` directly.
 
-This is done via a DHCP reservation on the router: the Pi keeps using DHCP, but the Livebox always hands it the same address based on its MAC address.
+This is done via a DHCP reservation on the router: the Pi keeps using DHCP, but the router always hands it the same address based on its MAC address.
 
 **Step 1 — Get the Pi's MAC address:**
 
@@ -127,22 +125,20 @@ ip link show eth0
 # Example: link/ether dc:a6:32:xx:xx:xx
 ```
 
-**Step 2 — Log into the Livebox admin interface:**
+**Step 2 — Log into your router's admin interface:**
 
 From your Mac or iPhone browser:
-1. Go to `http://192.168.1.1`
-2. Log in (default credentials are printed on the back of the Livebox, usually `admin` / your WiFi password)
+1. Go to `http://192.168.1.1` (typical default — check your router's label if different)
+2. Log in with your admin credentials (usually printed on the router's label)
 
 **Step 3 — Create the DHCP reservation:**
 
-1. Go to **Network** → **DHCP**
-2. Scroll to the **Static Leases** (or "Baux statiques") section
-3. Click **Add** (or "Ajouter")
-4. Fill in:
+The exact UI varies by router model. Look for a section labelled **DHCP**, **LAN**, or **Network** in your router's admin panel, then find **Static Leases**, **Address Reservation**, or similar. Create a new entry with:
    - **MAC address**: the `dc:a6:32:xx:xx:xx` value from Step 1
    - **IP address**: `192.168.1.50`
-   - **Name** (optional): `vpi5`
-5. Save and apply
+   - **Name / Label** (optional): `vpi5`
+
+Save and apply.
 
 **Step 4 — Verify:**
 
@@ -1235,7 +1231,7 @@ sudo fail2ban-client status sshd
 - ✅ SSH key-only authentication (no password login)
 - ✅ UFW firewall (deny all incoming except SSH, Tailscale & NextCloud HTTPS)
 - ✅ Fail2ban (auto-ban brute force attempts)
-- ✅ Mullvad VPN (no-logs provider, WireGuard protocol)
+- ✅ Mullvad VPN (WireGuard protocol, account-number based — no personal data required)
 - ✅ Encrypted DNS via Mullvad (10.64.0.1) — no DNS leaks
 - ✅ Tailscale (WireGuard-based mesh, no port forwarding needed)
 - ✅ Mullvad nftables patched (tailscale0 allowed in input, output & forward chains)
