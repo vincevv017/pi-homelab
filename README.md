@@ -19,12 +19,7 @@
 
 <br/>
 
-<!-- ═══════════════════════════════════════════════════════════
-     HERO IMAGE — replace with a photo of your hardware setup
-     Both Pis side by side in their metal cases works well
-     Ideal dimensions: 1200×600px
-     ═══════════════════════════════════════════════════════════ -->
-<!-- ![Pi Homelab hardware](./assets/hero.jpg) -->
+![Pi Homelab hardware](./assets/hardware.jpg)
 
 </div>
 
@@ -93,13 +88,6 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 → [Full setup guide](./pi1-vpn-exit-node/guide.md)
 
-<!-- ═══════════════════════════════════════════════════════════
-     PI 1 IMAGE — photo of Pi 1 in its metal case
-     Suggested: overhead or 3/4 angle, good lighting
-     Ideal dimensions: 800×450px
-     ═══════════════════════════════════════════════════════════ -->
-<!-- ![Pi 1 hardware](./assets/pi1-hardware.jpg) -->
-
 | Service | Role |
 |---|---|
 | **Mullvad VPN** | WireGuard tunnel — all client traffic exits via Swiss IP |
@@ -123,13 +111,6 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 ### <img src="https://cdn.simpleicons.org/raspberrypi/A22846" height="18" align="center" /> Pi 2 — Local LLM Node
 
 → [Full setup guide](./pi2-local-llm/guide.md)
-
-<!-- ═══════════════════════════════════════════════════════════
-     PI 2 IMAGE — photo of Pi 2 in its metal case
-     Same style as Pi 1 photo for visual consistency
-     Ideal dimensions: 800×450px
-     ═══════════════════════════════════════════════════════════ -->
-<!-- ![Pi 2 hardware](./assets/pi2-hardware.jpg) -->
 
 | Service | Role |
 |---|---|
@@ -162,12 +143,9 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 ## <img src="https://cdn.simpleicons.org/ollama/000000" height="22" align="center" /> Open WebUI
 
-<!-- ═══════════════════════════════════════════════════════════
-     OPEN WEBUI SCREENSHOT — browser capture of the interface
-     Show the chat UI with a model responding, dark theme
-     Ideal dimensions: 1200×700px
-     ═══════════════════════════════════════════════════════════ -->
-<!-- ![Open WebUI interface](./assets/openwebui-screenshot.png) -->
+
+![RAG query — council tax breakdown](./assets/mistral_council_tax.jpg)
+![RAG query — dental receipt](./assets/dentist.jpg)
 
 Accessible from any Tailscale-connected device at `https://YOUR_PI2_TAILSCALE_IP`. Supports model switching, conversation history, file uploads, and RAG queries against your Nextcloud Knowledge Base.
 
