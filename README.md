@@ -146,8 +146,11 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 
 ![RAG query — council tax breakdown](./assets/mistral_council_tax.jpg)
+
 *Mistral:7b answering a structured query against a Nextcloud document*
+
 ![RAG query — dental receipt](./assets/dentist.jpg)
+
 *llama3.2:3b answering a structured query against a Nextcloud document*
 
 Accessible from any Tailscale-connected device at `https://YOUR_PI2_TAILSCALE_IP`. Supports model switching, conversation history, file uploads, and RAG queries against your Nextcloud Knowledge Base.
