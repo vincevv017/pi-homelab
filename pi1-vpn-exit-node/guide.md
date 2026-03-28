@@ -360,6 +360,37 @@ sudo apt full-upgrade -y
 sudo apt autoremove -y
 ```
 
+### 3.6 Persistent Journaling
+
+By default, systemd only journals to RAM (`/run/log/journal`). On a reboot or crash, all logs are lost — making post-mortem diagnosis impossible. Enabling persistence writes logs to NVMe instead.
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
+Cap the journal size to avoid unbounded growth:
+```bash
+sudo nano /etc/systemd/journald.conf
+```
+
+Add under `[Journal]`:
+```
+SystemMaxUse=200M
+SystemKeepFree=500M
+```
+```bash
+sudo systemctl restart systemd-journald
+```
+
+Verify:
+```bash
+journalctl --disk-usage
+# Should show: Archived and active journals take up X.XM in /var/log/journal/...
+```
+
+From now on, `journalctl -b -1` will show the previous boot's logs — including the events leading up to any crash or unexpected reboot.
+
 ---
 
 ## Phase 4: Mullvad VPN Installation
