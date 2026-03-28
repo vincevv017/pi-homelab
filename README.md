@@ -20,6 +20,7 @@
 <br/>
 
 ![Pi Homelab hardware](./assets/hardware.jpg)
+*pi1 & pi2 side by side*
 
 </div>
 
@@ -145,7 +146,9 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 
 ![RAG query — council tax breakdown](./assets/mistral_council_tax.jpg)
+*Mistral:7b answering a structured query against a Nextcloud document*
 ![RAG query — dental receipt](./assets/dentist.jpg)
+*llama3.2:3b answering a structured query against a Nextcloud document*
 
 Accessible from any Tailscale-connected device at `https://YOUR_PI2_TAILSCALE_IP`. Supports model switching, conversation history, file uploads, and RAG queries against your Nextcloud Knowledge Base.
 
@@ -176,10 +179,9 @@ pi-homelab/
 ├── .gitignore
 │
 ├── assets/                                ← photos and screenshots
-│   ├── hero.jpg                           ← both Pis side by side (hero image)
-│   ├── pi1-hardware.jpg                   ← Pi 1 hardware photo
-│   ├── pi2-hardware.jpg                   ← Pi 2 hardware photo
-│   └── openwebui-screenshot.png           ← Open WebUI interface
+│   ├── hardware.jpg                       ← both Pis side by side
+│   ├── mistral_council_tax.jpg            ← Open WebUI interface (mistral:7b)
+│   └── dentist.jpg                        ← Open WebUI interface (llama3.2:3b)
 │
 ├── pi1-vpn-exit-node/
 │   ├── README.md                          ← node summary
