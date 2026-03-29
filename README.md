@@ -233,6 +233,33 @@ No cloud storage fees. No per-token API costs. No data leaving the network.
 
 ---
 
+## Next Steps
+
+The current stack runs inference entirely on-device. The next layer is **hybrid orchestration**: combining local models with external APIs to get the best of both worlds.
+
+**Why hybrid?** Ollama on a Pi 5 handles 3B–7B models well, which covers summarization, quick lookups, and code scaffolding. But planning-heavy tasks, multi-step reasoning, and complex analysis benefit from larger models available through APIs like Anthropic's Claude. Running an orchestration layer on Pi 2 lets you route tasks to the right model based on complexity and data sensitivity.
+
+**What this looks like in practice:**
+
+| Layer | Runs on | Role |
+|---|---|---|
+| **Orchestrator** | Pi 2 (Python) | Decides which model handles each task, manages tool use and memory |
+| **Local inference** | Pi 2 / Ollama | Private data, fast responses, RAG against Nextcloud KB |
+| **External inference** | Claude API | Complex reasoning, code generation, multi-step agents |
+| **Data boundary** | Orchestrator | Sensitive documents stay local; only synthesized queries go external |
+
+**Planned exploration:**
+
+- Agent frameworks (LangChain, CrewAI, or lightweight custom Python) running on Pi 2 as the orchestration layer
+- Claude API as an external provider in Open WebUI for side-by-side comparison with local models
+- Infrastructure agents that monitor the homelab itself: certificate expiry, service health, sync failures
+- Document processing pipelines that retrieve context locally from the Nextcloud KB but delegate analysis to Claude
+- Tool-using agents that combine web search, local file access, and LLM reasoning in multi-step workflows
+
+The data sovereignty principle stays the same: raw documents and personal data never leave the network. The orchestrator sends only derived context or abstract questions to external APIs, keeping the privacy boundary clean.
+
+---
+
 ## License
 
 [MIT](./LICENSE)
