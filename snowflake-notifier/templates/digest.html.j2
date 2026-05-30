@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snowflake Pulse — {{ date_long }}</title>
+<link rel="stylesheet" href="/digest/style.css">
+</head>
+<body>
+<div class="wrap">
+
+    <header class="masthead">
+        <h1 class="wordmark">Snowflake Pulse</h1>
+        <div class="meta">Daily ecosystem digest · self-hosted</div>
+        <div class="date">{{ date_long }}</div>
+    </header>
+
+    {% if degraded %}
+    <div class="degraded">⚠ Summaries unavailable on this run (Ollama offline). Items listed with excerpts only.</div>
+    {% endif %}
+
+    {% if top %}
+    <div class="section-label">Top today</div>
+    {% for item in top %}
+    <article class="item">
+        <div class="num">{{ loop.index }}</div>
+        <div>
+            <a class="title" href="{{ item.url }}" target="_blank" rel="noopener">{{ item.emoji }} {{ item.title }}</a>
+            <p class="summary">{{ item.summary }}</p>
+            <div class="meta-row">
+                {% if item.stars %}<span class="stars">{{ item.stars }}</span>{% endif %}
+                {% for kw in item.matched %}<span class="pill">{{ kw }}</span>{% endfor %}
+            </div>
+            <a class="source-link" href="{{ item.url }}" target="_blank" rel="noopener">{{ item.url }}</a>
+        </div>
+    </article>
+    {% endfor %}
+    {% endif %}
+
+    {% if additional %}
+    <div class="section-label">Also today</div>
+    <ol class="also">
+    {% for item in additional %}
+        <li>
+            <div class="num">{{ loop.index + top|length }}</div>
+            <div>
+                <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.emoji }} {{ item.title }}</a>
+                <span class="src">{{ item.url }}</span>
+            </div>
+        </li>
+    {% endfor %}
+    </ol>
+    {% endif %}
+
+    <footer>
+        Generated {{ generated_at }} · Pi 2 (vpi5-llm) · <a href="/digest/">archive</a>
+    </footer>
+
+</div>
+</body>
+</html>

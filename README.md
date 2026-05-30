@@ -19,6 +19,7 @@
 
 <br/>
 
+
 ![Pi Homelab hardware](./assets/hardware.jpg)
 *pi1 & pi2 side by side*
 
@@ -81,6 +82,8 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 **RAG flow:** `Pi 1 Nextcloud → WebDAV → Pi 2 /mnt/nextcloud → nc-knowledge-sync.py → Open WebUI KB`
 
+**Notifier flow:** `Pi 2 (08:00 timer) → Snowflake docs + Medium → Ollama llama3.2:3b → digest HTML → ntfy (Pi 1) → iPhone / macOS`
+
 ---
 
 ## Nodes
@@ -89,6 +92,8 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 → [Full setup guide](./pi1-vpn-exit-node/guide.md)
 
+
+
 | Service | Role |
 |---|---|
 | **Mullvad VPN** | WireGuard tunnel — all client traffic exits via Swiss IP |
@@ -96,6 +101,7 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 | **Nextcloud** | Private file sync — replaces iCloud / OneDrive / Google Drive |
 | **Nginx** | Reverse proxy + TLS termination |
 | **MariaDB** | Nextcloud database |
+| **ntfy** | Self-hosted push notification server (iOS / macOS delivery) |
 | **nftables watchdog** | Keeps `tailscale0` rules intact across Mullvad reconnects |
 
 | Component | Model |
@@ -113,6 +119,8 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 → [Full setup guide](./pi2-local-llm/guide.md)
 
+
+
 | Service | Role |
 |---|---|
 | **Ollama** | Local model runtime — downloads, manages, and serves LLMs |
@@ -120,6 +128,7 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 | **Nginx** | Reverse proxy + TLS termination |
 | **davfs2** | Mounts Nextcloud (Pi 1) via WebDAV for document access |
 | **nc-knowledge-sync** | Indexes Nextcloud files into Open WebUI Knowledge Base |
+| **Snowflake notifier** | Daily digest: Snowflake news → Ollama summaries → ntfy push |
 
 | Component | Model |
 |---|---|
@@ -144,7 +153,6 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 ## <img src="https://cdn.simpleicons.org/ollama/000000" height="22" align="center" /> Open WebUI
 
-
 ![RAG query — council tax breakdown](./assets/mistral_council_tax.jpg)
 
 *Mistral:7b answering a structured query against a Nextcloud document*
@@ -153,7 +161,32 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 *llama3.2:3b answering a structured query against a Nextcloud document*
 
+
 Accessible from any Tailscale-connected device at `https://YOUR_PI2_TAILSCALE_IP`. Supports model switching, conversation history, file uploads, and RAG queries against your Nextcloud Knowledge Base.
+
+---
+
+### 🔔 Snowflake Release Notifier
+
+→ [Module README](./snowflake-notifier/README.md) · [Full setup guide](./snowflake-notifier/guide.md)
+
+
+![Snowflake Pulse notification](./assets/notifier-ios-push.jpg)
+
+
+![Daily digest page](./assets/notifier-digest-page.jpg) 
+
+A Python script on Pi 2 runs daily at 08:00 via systemd timer. It fetches Snowflake release notes and the Snowflake blog, scores items against weighted keyword tiers, generates 1–2 sentence summaries with Ollama (`llama3.2:3b`), renders a daily HTML digest page served at `/digest/`, and pushes a notification to iPhone and macOS via the self-hosted ntfy server on Pi 1.
+
+**The keyword tiers are fully customisable** — swap in your own domain (dbt, Databricks, data engineering) without touching the pipeline. See the [Customization section](./snowflake-notifier/guide.md#️-customization-choose-your-domain) in the guide.
+
+| Component | Role |
+|---|---|
+| `notify_snowflake_releases.py` | Fetch · filter · score · summarize · render · post |
+| `keywords.json` | Weighted tiers — the only file you edit to change topics |
+| `sources.json` | Feed URLs, CSS selectors, enabled flags |
+| `templates/` | Jinja2 templates for daily page and archive index |
+| systemd timer | Fires at 08:00 daily, persistent across reboots |
 
 ---
 
@@ -184,22 +217,34 @@ pi-homelab/
 ├── assets/                                ← photos and screenshots
 │   ├── hardware.jpg                       ← both Pis side by side
 │   ├── mistral_council_tax.jpg            ← Open WebUI interface (mistral:7b)
-│   └── dentist.jpg                        ← Open WebUI interface (llama3.2:3b)
+│   ├── dentist.jpg                        ← Open WebUI interface (llama3.2:3b)
+│   ├── notifier-ios-push.jpg              ← iPhone notification screenshot
+│   └── notifier-digest-page.jpg           ← digest page screenshot
 │
 ├── pi1-vpn-exit-node/
 │   ├── README.md                          ← node summary
-│   └── guide.md                           ← complete setup guide (Phases 1–10)
-│                                            OS flash → NVMe boot → hardening →
-│                                            Mullvad → Tailscale → routing →
-│                                            Nextcloud → cert renewal
+│   └── guide.md                           ← OS flash → NVMe → Mullvad → Tailscale →
+│                                            Nextcloud → ntfy → cert renewal
 │
-└── pi2-local-llm/
-    ├── README.md                          ← node summary + script docs
-    ├── guide.md                           ← complete setup guide (Phases 4–8)
-    │                                        Tailscale → Ollama → Open WebUI →
-    │                                        WebDAV mount → RAG sync → cert renewal
-    └── scripts/
-        └── nc-knowledge-sync.py           ← Nextcloud → Open WebUI KB sync
+├── pi2-local-llm/
+│   ├── README.md                          ← node summary + script docs
+│   ├── guide.md                           ← Tailscale → Ollama → Open WebUI →
+│   │                                        WebDAV → RAG sync → cert renewal
+│   └── scripts/
+│       └── nc-knowledge-sync.py           ← Nextcloud → Open WebUI KB sync
+│
+└── snowflake-notifier/
+    ├── README.md                          ← module summary + quick reference
+    ├── guide.md                           ← complete setup guide
+    ├── notify_snowflake_releases.py       ← main script (v1.0)
+    ├── keywords.json                      ← keyword tiers (customise this)
+    ├── sources.json                       ← feed config
+    ├── snowflake-notifier.service         ← systemd oneshot service
+    ├── snowflake-notifier.timer           ← systemd daily 08:00 timer
+    ├── style.css                          ← digest stylesheet
+    └── templates/
+        ├── digest.html.j2                 ← daily digest template
+        └── index.html.j2                  ← archive index template
 ```
 
 ---

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snowflake Pulse — archive</title>
+<link rel="stylesheet" href="/digest/style.css">
+</head>
+<body>
+<div class="wrap">
+
+    <header class="masthead">
+        <h1 class="wordmark">Snowflake Pulse</h1>
+        <div class="meta">Daily ecosystem digest · archive</div>
+        <div class="date">{{ entries|length }} day{{ '' if entries|length == 1 else 's' }} on file</div>
+    </header>
+
+    <ul class="archive-list">
+    {% for entry in entries %}
+        <li>
+            <a href="{{ entry.filename }}">{{ entry.date_long }}</a>
+            <span class="count">{{ entry.item_count }} item{{ '' if entry.item_count == 1 else 's' }}</span>
+        </li>
+    {% endfor %}
+    </ul>
+
+    <footer>
+        Self-hosted · Pi 2 (vpi5-llm)
+    </footer>
+
+</div>
+</body>
+</html>

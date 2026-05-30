@@ -1,6 +1,6 @@
 # Raspberry Pi 5 — Local LLM Node
 
-Local AI inference on your own hardware, accessible exclusively through your Tailscale mesh. Models run on infrastructure you control — no external API calls, no usage limits, no third-party dependency on the inference path.
+Private AI inference on your own hardware, accessible exclusively through your Tailscale mesh. No data leaves your network. No API keys, no usage limits, no cloud dependency.
 
 **Result:** A self-hosted LLM server running Ollama and Open WebUI, accessible from iPhone, iPad, and Mac via Tailscale. Models run entirely on the Pi 5 16GB. Documents stored in Nextcloud on Pi 1 are available to the LLM via WebDAV for RAG workflows.
 
@@ -42,7 +42,7 @@ tailscale status --self --json | python3 -c "import sys,json; d=json.load(sys.st
 | Case | Metal enclosure |
 | Power | Official 27W USB-C Power Supply |
 | SD Card | 64GB microSD (initial setup only) |
-| Network | Ethernet cable + Internet router (fiber) |
+| Network | Ethernet cable + Orange Livebox 5 (fiber) |
 
 **Why 16GB RAM?** LLMs load their full model weights into memory at runtime. A 7B parameter model in 4-bit quantization requires ~4–5GB of RAM. 16GB gives comfortable headroom to run a 7B model alongside the OS and Open WebUI without swapping to disk, which would make inference unusably slow on NVMe.
 
@@ -56,7 +56,7 @@ tailscale status --self --json | python3 -c "import sys,json; d=json.load(sys.st
 
 **What is RAG?** Retrieval-Augmented Generation. Instead of asking the model to answer from its training data alone, RAG lets it search a document collection first and base its answer on the retrieved content. In this setup, your Nextcloud documents (stored on Pi 1) are mounted on Pi 2 via WebDAV and made available to Open WebUI as a knowledge base.
 
-**Why no Mullvad on Pi 2?** Pi 2 is a compute node, not a network exit point. It has no outbound routing role — all access comes in through Tailscale, and the node itself never initiates connections to the public internet. Adding Mullvad would introduce nftables complexity with no operational benefit for this use case.
+**Why no Mullvad on Pi 2?** Pi 2 is a compute node, not a network exit point. It doesn't need to anonymise traffic — it never connects to the internet directly. All access is through Tailscale, which provides end-to-end encryption. Adding Mullvad would introduce nftables complexity with no privacy benefit for this use case.
 
 ---
 
@@ -65,7 +65,7 @@ tailscale status --self --json | python3 -c "import sys,json; d=json.load(sys.st
 Follow the **Pi 1 guide (Phases 1–3.5)** before continuing here. This covers:
 
 - Phase 1: OS flash, first boot, SSH access
-- **1.5**: Assign static IP `192.168.1.52` on your router (Pi 1 uses `192.168.1.50`)
+- **1.5**: Assign static IP `192.168.1.52` on the Livebox (Pi 1 uses `192.168.1.50`)
 - Phase 2: NVMe boot configuration
 - Phase 3: Security hardening (SSH keys, UFW, fail2ban, system updates)
 
@@ -74,7 +74,7 @@ Follow the **Pi 1 guide (Phases 1–3.5)** before continuing here. This covers:
 ssh-copy-id username@192.168.1.52
 ```
 
-After completing Phase 3.6, return here.
+After completing Phase 3.5, return here.
 
 ---
 
@@ -984,15 +984,38 @@ From the LAN: `ssh username@192.168.1.52` should also connect.
 
 ## Maintenance
 
-**Updating models:**
+**Updating Ollama:**
+
+Ollama does not auto-update. Re-run the install script to upgrade in place — it detects the existing installation, preserves your models and service config, and restarts the service automatically:
 
 ```bash
-# Pull updated version of a model
-ollama pull mistral:7b
+curl -fsSL https://ollama.com/install.sh | sh
+```
 
-# Remove old or unused models
-ollama rm modelname
+Verify the service restarted cleanly and models are intact:
+
+```bash
+sudo systemctl status ollama --no-pager
 ollama list
+```
+
+**Updating models:**
+
+After upgrading Ollama, pull updated versions of all models. `ollama pull` on an existing tag fetches the latest version and replaces the old one:
+
+```bash
+ollama pull llama3.2:3b
+ollama pull mistral:7b
+ollama pull qwen2.5-coder:7b
+
+# Confirm updated versions
+ollama list
+```
+
+To remove an unused model:
+
+```bash
+ollama rm modelname
 ```
 
 **Updating Open WebUI:**

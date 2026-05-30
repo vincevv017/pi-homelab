@@ -1,0 +1,46 @@
+{
+  "feeds": [
+    {
+      "name": "snowflake_release_notes",
+      "url": "https://docs.snowflake.com/en/release-notes/new-features",
+      "type": "html_scrape",
+      "category": "Official",
+      "emoji": "🎉",
+      "parse_rules": {
+        "selector_item": "li.font-normal",
+        "selector_title": "a",
+        "date_from_title": true,
+        "selector_content": null,
+        "href_must_contain": "/release-notes/2"
+      },
+      "enabled": true
+    },
+    {
+      "name": "snowflake_medium",
+      "url": "https://medium.com/feed/snowflake",
+      "type": "rss",
+      "category": "Official",
+      "emoji": "📢",
+      "_comment": "Snowflake publication on Medium. Replaces the dead snowflake.com/blog/feed/ URL.",
+      "enabled": true
+    },
+    {
+      "name": "snowflake_community",
+      "url": "https://community.snowflake.com/s/forum",
+      "type": "html_scrape_js",
+      "category": "Community",
+      "emoji": "💬",
+      "_comment": "Salesforce Experience Cloud. Requires Playwright/Selenium. Out of scope for v1.",
+      "enabled": false
+    },
+    {
+      "name": "osi_releases",
+      "url": "https://github.com/open-semantic-interchange/OSI/releases.atom",
+      "type": "rss",
+      "category": "Spec",
+      "emoji": "📋",
+      "_comment": "Open Semantic Interchange. No releases yet; flip enabled to true when first release lands.",
+      "enabled": false
+    }
+  ]
+}

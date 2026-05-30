@@ -1,0 +1,13 @@
+[Unit]
+Description=Snowflake daily release / community notifier
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/snowflake-notifier-run.sh
+User=vincepi
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+EnvironmentFile=-/home/vincepi/.config/snowflake-notifier/env

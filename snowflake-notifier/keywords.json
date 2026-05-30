@@ -1,0 +1,41 @@
+{
+  "tier_1_critical": {
+    "keywords": [
+      "semantic view",
+      "cortex analyst",
+      "cortex agent",
+      "cortex search",
+      "snowflake intelligence",
+      "ontology",
+      "ai/bi"
+    ],
+    "weight": 3,
+    "description": "Core agentic BI platform"
+  },
+  "tier_2_important": {
+    "keywords": [
+      "lineage",
+      "data governance",
+      "aggregate awareness",
+      "metric composition",
+      "dbt semantic",
+      "streamlit",
+      "data catalog",
+      "data visualization"
+    ],
+    "weight": 2,
+    "description": "Semantic layer & governance"
+  },
+  "tier_3_adjacent": {
+    "keywords": [
+      "snowpark",
+      "ai/ml",
+      "cortex llm",
+      "vectors",
+      "dynamic tables",
+      "iceberg"
+    ],
+    "weight": 1,
+    "description": "Ecosystem & adjacent"
+  }
+}
