@@ -1556,39 +1556,6 @@ sudo systemctl start ollama
 
 ---
 
-## Phase G — Push to GitHub
-
-On macOS:
-
-```bash
-cd ~/Raspberry/pi-homelab
-
-# Pull the updated script from Pi 2
-scp YOUR_PI2_USERNAME@vpi5-llm:~/notify_snowflake_releases.py \
-  snowflake-notifier/notify_snowflake_releases.py
-
-# Pull config files
-scp YOUR_PI2_USERNAME@vpi5-llm:/etc/snowflake-notifier/keywords.json \
-  snowflake-notifier/keywords.json
-scp YOUR_PI2_USERNAME@vpi5-llm:/etc/snowflake-notifier/sources.json \
-  snowflake-notifier/sources.json
-
-git add snowflake-notifier/
-git commit -m "feat: snowflake release notifier v1.3
-
-- Daily ntfy push: release notes + Medium blog filtered by keyword tiers
-- Digest HTML page served at /digest/ (Jinja2, Fraunces + IBM Plex)
-- Local LLM summaries via Ollama llama3.2:3b
-- Type-aware filter: html_scrape bypasses 24h gate, RSS keeps it
-- Fix: Snowflake docs Sphinx→Tailwind selector migration (li.font-normal)
-- Fix: date regex handles new dash-separated and date-range title formats
-- Fix: dynamic base_url in fetch_html (no hardcoded path prefix)
-- WARNING log when any html_scrape source returns 0 entries"
-git push
-```
-
----
-
 ## Selector diagnostics
 
 The Snowflake docs site has restructured at least once. When `snowflake_release_notes` returns 0 entries, the selector has drifted.
