@@ -5,7 +5,7 @@
 **Status:** Production-ready  
 **Covers:** ntfy setup · notifier script · digest page · ntfy web UI fix · selector diagnostics
 
-This guide merges four implementation documents into a single, linear walkthrough. Follow it top to bottom on a fresh Pi homelab setup. If you already have an earlier version running, jump to [Upgrading an existing install](#upgrading-an-existing-install).
+This guide is a single, linear walkthrough. Follow it top to bottom on a fresh Pi homelab setup.
 
 ---
 
@@ -1589,45 +1589,6 @@ git push
 
 ---
 
-## Upgrading an existing install
-
-If you already have v1.0–v1.2 running, apply only these changes:
-
-**1. Replace the script on Pi 2:**
-
-```bash
-sudo cp ~/notify_snowflake_releases.py /usr/local/bin/notify_snowflake_releases.py.bak
-nano ~/notify_snowflake_releases.py
-# Replace with the full script from Phase D above
-sudo cp ~/notify_snowflake_releases.py /usr/local/bin/notify_snowflake_releases.py
-python3 -m py_compile /usr/local/bin/notify_snowflake_releases.py && echo "ok"
-```
-
-**2. Update `sources.json`:**
-
-```bash
-sudo nano /etc/snowflake-notifier/sources.json
-```
-
-For the `snowflake_release_notes` entry, change:
-- `"url"` → `"https://docs.snowflake.com/en/release-notes/new-features"`
-- `"selector_item"` → `"li.font-normal"`
-- `"selector_title"` → `"a"`
-- `"selector_content"` → `null`
-- Add `"href_must_contain": "/release-notes/2"`
-- Remove `date_from_url` if present
-
-**3. Test:**
-
-```bash
-sudo systemctl start snowflake-notifier.service
-journalctl -u snowflake-notifier --since "today" | grep -E "fetched|WARNING|After"
-```
-
-`snowflake_release_notes` should now show `fetched N entries` with N > 0. If it still shows 0, run the selector diagnostic below.
-
----
-
 ## Selector diagnostics
 
 The Snowflake docs site has restructured at least once. When `snowflake_release_notes` returns 0 entries, the selector has drifted.
@@ -1718,7 +1679,7 @@ The CSS selector is stale. Run the selector diagnostic above. Update `sources.js
 
 Two separate causes, both required to fix:
 
-1. **Selector stale** — `fetch_html` returns 0 items, so only RSS items reach the filter. Fix: update selectors (Phase B.5 / Upgrading section).
+1. **Selector stale** — `fetch_html` returns 0 items, so only RSS items reach the filter. Fix: update selectors (Phase B.5).
 2. **Time gate too strict** — even with working selectors, release notes entries that are 1–6 days old are dropped by the 24h filter. Fix: the type-aware `filter_items` in v1.2+ handles this; confirm v1.3 is in place.
 
 With v1.3 installed and the correct selectors, both sources should appear every day.
