@@ -1,6 +1,6 @@
 # Snowflake Release Notifier — Complete Setup Guide
 
-**Version:** 1.3  
+**Version:** 1.0  
 **Date:** 2026-05-30  
 **Status:** Production-ready  
 **Covers:** ntfy setup · notifier script · digest page · ntfy web UI fix · selector diagnostics
@@ -1406,7 +1406,7 @@ if __name__ == "__main__":
 ```bash
 sudo cp ~/notify_snowflake_releases.py /usr/local/bin/notify_snowflake_releases.py
 sudo chmod +x /usr/local/bin/notify_snowflake_releases.py
-python3 -m py_compile /usr/local/bin/notify_snowflake_releases.py && echo "syntax ok"
+python3 -m ast.parse /usr/local/bin/notify_snowflake_releases.py && echo "syntax ok"
 ```
 
 ---

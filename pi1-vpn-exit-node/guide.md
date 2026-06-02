@@ -1687,21 +1687,25 @@ Paste (replace `vpi5.your-tailnet.ts.net` with your actual Pi 1 Tailscale hostna
 
 ```bash
 #!/bin/bash
+set -e
+
 HOSTNAME="vpi5.your-tailnet.ts.net"
 CERT_DIR="/etc/tailscale/certs"
+WORK_DIR=$(mktemp -d)
+trap "rm -rf $WORK_DIR" EXIT
 
+cd "$WORK_DIR"
 tailscale cert "$HOSTNAME"
 
-# Only copy + reload if the cert has actually changed
 if ! diff -q "${HOSTNAME}.crt" "${CERT_DIR}/${HOSTNAME}.crt" > /dev/null 2>&1; then
     cp "${HOSTNAME}.crt" "${CERT_DIR}/"
     cp "${HOSTNAME}.key" "${CERT_DIR}/"
     chmod 640 "${CERT_DIR}/${HOSTNAME}.key"
     docker compose -f /home/YOUR_USERNAME/nextcloud/docker-compose.yml exec nginx nginx -s reload
     logger "tailscale-cert-renew: cert renewed and nginx reloaded"
+else
+    logger "tailscale-cert-renew: cert unchanged, no reload needed"
 fi
-
-rm -f "${HOSTNAME}.crt" "${HOSTNAME}.key"
 ```
 
 ```bash
@@ -1757,7 +1761,15 @@ Verify the timer is scheduled:
 
 ```bash
 systemctl list-timers | grep tailscale-cert
-# Should show next run ~1 month out
+```
+
+Verify the cert is valid and check expiry:
+
+```bash
+echo | openssl s_client \
+  -connect $(tailscale ip -4):443 \
+  -servername YOUR-PI1-HOSTNAME.your-tailnet.ts.net 2>/dev/null \
+  | openssl x509 -noout -dates
 ```
 
 **How it works:** `tailscale cert` requests a fresh certificate from Let's Encrypt via Tailscale's coordination server. The script compares the new cert against the one currently in `/etc/tailscale/certs/` — if they differ, it copies the new files and sends a reload signal to the Nginx container. If the cert hasn't changed (e.g. it was renewed recently), the script exits without touching anything. The `Persistent=true` flag means if the Pi was off when the timer was due, it runs at next boot.
@@ -1768,6 +1780,21 @@ systemctl list-timers | grep tailscale-cert
 sudo /usr/local/bin/tailscale-cert-renew.sh
 journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
 ```
+
+**Monthly check — verify the timer ran and the cert is healthy:**
+
+```bash
+# Did the timer fire and what did it log?
+journalctl | grep tailscale-cert-renew
+
+# Is the cert still valid?
+echo | openssl s_client \
+  -connect $(tailscale ip -4):443 \
+  -servername YOUR-PI1-HOSTNAME.your-tailnet.ts.net 2>/dev/null \
+  | openssl x509 -noout -dates
+```
+
+The first command should show either `cert renewed and nginx reloaded` or `cert unchanged, no reload needed` — both are expected depending on timing. The cert is valid for 90 days; Let's Encrypt only allows renewal inside the 30-day window, so `unchanged` is the normal output for the first two monthly runs after a renewal.
 
 ---
 

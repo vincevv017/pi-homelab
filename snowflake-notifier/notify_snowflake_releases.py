@@ -6,6 +6,7 @@ Spec: SNOWFLAKE_RELEASE_NOTIFIER_SPEC_20260505.md Rev 2.1
 Changelog:
   2026-05-09  Added digest page generation (guide: Snowflake_Notifier_Digest_Page_20260509.md)
   2026-05-25  Fix: bypass 24h time filter for html_scrape sources (release notes now dedupe-gated only)
+  2026-06-02  Implement render_digest() + ntfy Click/Actions headers (digest button was never wired up)
 """
 
 import json
@@ -22,6 +23,7 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
+from jinja2 import Environment, FileSystemLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +48,11 @@ STATE_DIR      = Path(os.environ.get("STATE_DIR",
 SUMMARY_CACHE_FILE  = STATE_DIR / "summary_cache.json"
 NOTIFIED_URLS_FILE  = STATE_DIR / "notified_urls.json"
 RUN_STATE_FILE      = STATE_DIR / "run_state.json"
+
+DIGEST_DIR      = Path(os.environ.get("DIGEST_DIR",
+                    str(Path.home() / "openwebui/digest")))
+DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "")   # e.g. https://REDACTED_TAILSCALE_HOST
+TEMPLATES_DIR   = Path(os.environ.get("TEMPLATES_DIR", "/etc/snowflake-notifier/templates"))
 
 OLLAMA_TIMEOUT      = 240   # seconds per generate call
 NTFY_RETRY_DELAYS   = [2, 4, 8]
@@ -386,16 +393,95 @@ def build_body(top_5: list, additional: list, degraded: bool) -> str:
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
+# Digest page rendering
+# ---------------------------------------------------------------------------
+
+def _count_digest_items(html_file: Path) -> int:
+    """Count items in an existing digest HTML by div.num occurrences."""
+    try:
+        return len(re.findall(r'class="num"', html_file.read_text()))
+    except Exception:
+        return 0
+
+def render_digest(top_5: list, additional: list, degraded: bool) -> str:
+    """
+    Render today's digest HTML and rebuild the archive index.
+    Returns the full URL of today's page, or "" if DIGEST_BASE_URL is unset.
+    """
+    if not DIGEST_BASE_URL:
+        log.warning("DIGEST_BASE_URL not set — skipping digest render")
+        return ""
+
+    jenv = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
+
+    today        = datetime.now().strftime("%Y-%m-%d")
+    date_long    = datetime.now().strftime("%B %-d, %Y")
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def prep(item):
+        return {
+            "title":   item["title"],
+            "url":     item["url"],
+            "emoji":   item.get("emoji", ""),
+            "summary": item.get("summary", ""),
+            "stars":   stars_for_score(item["score"]),
+            "matched": item.get("matched", []),
+        }
+
+    # Render today's digest page
+    day_html = jenv.get_template("digest.html.j2").render(
+        date_long=date_long,
+        generated_at=generated_at,
+        top=[prep(i) for i in top_5],
+        additional=[prep(i) for i in additional],
+        degraded=degraded,
+    )
+    DIGEST_DIR.mkdir(parents=True, exist_ok=True)
+    (DIGEST_DIR / f"{today}.html").write_text(day_html)
+    log.info("Digest written: %s/%s.html", DIGEST_DIR, today)
+
+    # Rebuild archive index — prune files older than 30 days
+    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    entries = []
+    for f in sorted(DIGEST_DIR.glob("20??-??-??.html"), reverse=True):
+        date_str = f.stem
+        if date_str < cutoff:
+            f.unlink()
+            log.info("Pruned old digest: %s", f.name)
+            continue
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            continue
+        item_count = (len(top_5) + len(additional)) if date_str == today \
+                     else _count_digest_items(f)
+        entries.append({
+            "filename":   f.name,
+            "date_long":  d.strftime("%B %-d, %Y"),
+            "item_count": item_count,
+        })
+
+    (DIGEST_DIR / "index.html").write_text(
+        jenv.get_template("index.html.j2").render(entries=entries)
+    )
+    log.info("Archive index rebuilt (%d entries)", len(entries))
+
+    return f"{DIGEST_BASE_URL}/digest/{today}.html"
+
+# ---------------------------------------------------------------------------
 # ntfy POST with retry
 # ---------------------------------------------------------------------------
 
-def post_ntfy(body: str) -> bool:
+def post_ntfy(body: str, digest_url: str = "") -> bool:
     headers = {
         "Authorization": f"Bearer {NTFY_TOKEN}",
         "Title": "Snowflake Pulse",
         "Priority": "default",
         "Tags": "snowflake,data",
     }
+    if digest_url:
+        headers["Click"]   = digest_url
+        headers["Actions"] = f"view, View Digest, {digest_url}"
     for attempt, delay in enumerate([0] + NTFY_RETRY_DELAYS, 1):
         if delay:
             log.warning("ntfy retry %d in %ds...", attempt, delay)
@@ -511,9 +597,16 @@ def main():
         else:
             item["summary"] = sanitize_for_ollama(item["raw_text"])[:200]
 
+    # Render digest page (before posting so URL is ready when notification fires)
+    digest_url = ""
+    try:
+        digest_url = render_digest(top_5, additional, degraded)
+    except Exception as e:
+        log.warning("Digest render failed — notification will proceed without button: %s", e)
+
     # Build and post notification
     body = build_body(top_5, additional, degraded)
-    posted = post_ntfy(body)
+    posted = post_ntfy(body, digest_url)
 
     if posted:
         today = datetime.now(timezone.utc).date().isoformat()
