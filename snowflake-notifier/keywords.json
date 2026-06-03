@@ -7,35 +7,49 @@
       "cortex search",
       "snowflake intelligence",
       "ontology",
-      "ai/bi"
+      "ai/bi",
+      "horizon context",
+      "horizon catalog",
+      "open semantic interchange"
     ],
     "weight": 3,
-    "description": "Core agentic BI platform"
+    "description": "Core agentic BI platform & governed semantic layer"
   },
   "tier_2_important": {
     "keywords": [
       "lineage",
+      "column-level lineage",
       "data governance",
       "aggregate awareness",
       "metric composition",
-      "dbt semantic",
+      "dbt",
       "streamlit",
       "data catalog",
-      "data visualization"
+      "data visualization",
+      "cortex ai functions",
+      "data clean room",
+      "metadata connector",
+      "openlineage"
     ],
     "weight": 2,
-    "description": "Semantic layer & governance"
+    "description": "Semantic layer, governance & catalog ecosystem"
   },
   "tier_3_adjacent": {
     "keywords": [
       "snowpark",
       "ai/ml",
       "cortex llm",
+      "cortex ai",
+      "ai_classify",
+      "ai_extract",
+      "ai_transcribe",
       "vectors",
       "dynamic tables",
-      "iceberg"
+      "iceberg",
+      "notebook",
+      "cowork"
     ],
     "weight": 1,
-    "description": "Ecosystem & adjacent"
+    "description": "Cortex AI functions, data engineering & ecosystem"
   }
 }
