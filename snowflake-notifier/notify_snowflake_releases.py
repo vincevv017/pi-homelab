@@ -374,8 +374,7 @@ def build_body(top_5: list, additional: list, degraded: bool) -> str:
         for i, item in enumerate(top_5, 1):
             stars = stars_for_score(item["score"])
             kws   = ", ".join(item["matched"])
-            lines.append(f"{i}. {item['emoji']} {item['title']}")
-            lines.append(item["summary"])
+            lines.append(f"{i}. {item['emoji']} {item['title'][:80]}")
             lines.append(f"{stars} {kws}")
             lines.append(f"→ {item['url']}")
             lines.append("")
@@ -383,7 +382,7 @@ def build_body(top_5: list, additional: list, degraded: bool) -> str:
     if additional:
         lines += ["━" * 39, "ALSO TODAY", "━" * 39, ""]
         for i, item in enumerate(additional, len(top_5) + 1):
-            lines.append(f"{i}. {item['emoji']} {item['title']}")
+            lines.append(f"{i}. {item['emoji']} {item['title'][:80]}")
             lines.append(f"   → {item['url']}")
             lines.append("")
 

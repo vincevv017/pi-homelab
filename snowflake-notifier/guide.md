@@ -359,9 +359,10 @@ Paste (replace placeholders):
 NTFY_URL="https://YOUR_PI1_TAILSCALE_HOSTNAME/ntfy/snowflake_releases"
 NTFY_TOKEN="YOUR_NTFY_TOKEN"
 DIGEST_DIR="/home/YOUR_PI2_USERNAME/openwebui/digest"
-DIGEST_BASE_URL="https://YOUR_PI2_TAILSCALE_HOSTNAME/digest"
+DIGEST_BASE_URL="https://YOUR_PI2_TAILSCALE_HOSTNAME"
 ```
-
+# ⚠️  Do NOT append /digest here — the script constructs the full path internally.
+#     Setting https://hostname/digest produces a double-path 404 (digest/digest/…).
 ```bash
 chmod 600 ~/.config/snowflake-notifier/env
 ```
@@ -1665,6 +1666,17 @@ Title format doesn't match any of the four patterns in `extract_date_from_title`
 ### Digest page returns 404
 
 Check the nginx container has the volume mount (`./digest:/var/www/digest:ro`) and the `/digest/` location block is present in the config. Verify with `docker compose exec nginx nginx -t`.
+
+**Double-path symptom** (`/digest/digest/2026-xx-xx.html`): `DIGEST_BASE_URL` incorrectly
+includes the `/digest` suffix. The script appends `/digest/<date>.html` itself.
+Fix: set `DIGEST_BASE_URL=https://<hostname>` (no trailing path) in the env file.
+
+**File missing**: check the journal for `Digest written:` — if absent, `render_digest()`
+threw an exception (template not found, permissions). Re-check `TEMPLATES_DIR` and that
+`digest.html.j2` / `index.html.j2` exist in `/etc/snowflake-notifier/templates/`.
+
+**nginx not serving**: confirm the volume mount (`./digest:/var/www/digest:ro`) and the
+`/digest/` location block are present. Verify with `docker compose exec nginx nginx -t`.
 
 ### Ollama slow or timing out
 
