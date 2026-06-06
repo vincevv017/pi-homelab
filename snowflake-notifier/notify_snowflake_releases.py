@@ -45,13 +45,14 @@ SOURCES_FILE   = os.environ.get("SOURCES_FILE", "/etc/snowflake-notifier/sources
 STATE_DIR      = Path(os.environ.get("STATE_DIR",
                   str(Path.home() / ".local/share/snowflake-notifier")))
 
-SUMMARY_CACHE_FILE  = STATE_DIR / "summary_cache.json"
-NOTIFIED_URLS_FILE  = STATE_DIR / "notified_urls.json"
-RUN_STATE_FILE      = STATE_DIR / "run_state.json"
+SUMMARY_CACHE_FILE   = STATE_DIR / "summary_cache.json"
+NOTIFIED_URLS_FILE   = STATE_DIR / "notified_urls.json"
+RUN_STATE_FILE       = STATE_DIR / "run_state.json"
+SHORT_URL_CACHE_FILE = STATE_DIR / "short_url_cache.json"
 
 DIGEST_DIR      = Path(os.environ.get("DIGEST_DIR",
                     str(Path.home() / "openwebui/digest")))
-DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "")   # e.g. https://REDACTED_TAILSCALE_HOST
+DIGEST_BASE_URL = os.environ.get("DIGEST_BASE_URL", "")   # e.g. https://<hostname>.<tailnet>.ts.net
 TEMPLATES_DIR   = Path(os.environ.get("TEMPLATES_DIR", "/etc/snowflake-notifier/templates"))
 
 OLLAMA_TIMEOUT      = 240   # seconds per generate call
@@ -365,6 +366,33 @@ def ollama_summarize(text: str) -> str:
 # Notification format
 # ---------------------------------------------------------------------------
 
+def shorten_url(url: str, cache: dict) -> str:
+    """Return a TinyURL short link for *url*, using/updating *cache* in-place.
+
+    The original URL is preserved in item['url'] for dedup — this is display-only.
+    Falls back to the original URL silently on any API error or unexpected response.
+    Note: only shorten public URLs (Snowflake docs, Medium). Tailscale URLs are
+    intentionally excluded at the call site.
+    """
+    if url in cache:
+        return cache[url]
+    try:
+        r = requests.get(
+            "https://tinyurl.com/api-create.php",
+            params={"url": url},
+            timeout=8,
+        )
+        if r.status_code == 200 and r.text.strip().startswith("https://tinyurl.com/"):
+            short = r.text.strip()
+            cache[url] = short
+            log.info("Shortened: %s → %s", url[:70], short)
+            return short
+        log.warning("TinyURL unexpected response (%d) for %s", r.status_code, url[:70])
+    except Exception as e:
+        log.warning("TinyURL failed for %s: %s — using original URL", url[:70], e)
+    return url
+
+
 def build_body(top_5: list, additional: list, degraded: bool) -> str:
     date_str = datetime.now().strftime("%B %-d, %Y")
     lines = [f"🎉 SNOWFLAKE PULSE — {date_str}", ""]
@@ -376,14 +404,14 @@ def build_body(top_5: list, additional: list, degraded: bool) -> str:
             kws   = ", ".join(item["matched"])
             lines.append(f"{i}. {item['emoji']} {item['title'][:80]}")
             lines.append(f"{stars} {kws}")
-            lines.append(f"→ {item['url']}")
+            lines.append(f"→ {item.get('short_url', item['url'])}")
             lines.append("")
 
     if additional:
         lines += ["━" * 39, "ALSO TODAY", "━" * 39, ""]
         for i, item in enumerate(additional, len(top_5) + 1):
             lines.append(f"{i}. {item['emoji']} {item['title'][:80]}")
-            lines.append(f"   → {item['url']}")
+            lines.append(f"   → {item.get('short_url', item['url'])}")
             lines.append("")
 
     if degraded:
@@ -514,6 +542,7 @@ def main():
     # Load state
     summary_cache  = load_json(SUMMARY_CACHE_FILE, {"version": 1, "items": {}})
     notified_urls  = load_json(NOTIFIED_URLS_FILE, {"version": 1, "items": {}})
+    short_url_cache = load_json(SHORT_URL_CACHE_FILE, {})
 
     # Prune stale state
     summary_cache["items"] = prune_dict_by_date(summary_cache.get("items", {}), 90)
@@ -595,6 +624,12 @@ def main():
                 degraded = True
         else:
             item["summary"] = sanitize_for_ollama(item["raw_text"])[:200]
+
+    # Shorten article URLs for display in ntfy body — best-effort, item['url'] untouched
+    # Digest URL is intentionally NOT shortened (Tailscale URL, no public redirect wanted)
+    for item in top_5 + additional:
+        item["short_url"] = shorten_url(item["url"], short_url_cache)
+    save_json(SHORT_URL_CACHE_FILE, short_url_cache)
 
     # Render digest page (before posting so URL is ready when notification fires)
     digest_url = ""
