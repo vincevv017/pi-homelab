@@ -45,7 +45,7 @@
             <div class="num">{{ loop.index + top|length }}</div>
             <div>
                 <a href="{{ item.url }}" target="_blank" rel="noopener">{{ item.emoji }} {{ item.title }}</a>
-                <span class="src">{{ item.url }}</span>
+                <a class="src" href="{{ item.url }}" target="_blank" rel="noopener">{{ item.url }}</a>
             </div>
         </li>
     {% endfor %}

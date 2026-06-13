@@ -367,7 +367,7 @@ def ollama_summarize(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def shorten_url(url: str, cache: dict) -> str:
-    """Return a TinyURL short link for *url*, using/updating *cache* in-place.
+    """Return an is.gd short link for *url*, using/updating *cache* in-place.
 
     The original URL is preserved in item['url'] for dedup — this is display-only.
     Falls back to the original URL silently on any API error or unexpected response.
@@ -378,18 +378,18 @@ def shorten_url(url: str, cache: dict) -> str:
         return cache[url]
     try:
         r = requests.get(
-            "https://tinyurl.com/api-create.php",
-            params={"url": url},
+            "https://is.gd/create.php",
+            params={"format": "simple", "url": url},
             timeout=8,
         )
-        if r.status_code == 200 and r.text.strip().startswith("https://tinyurl.com/"):
+        if r.status_code == 200 and r.text.strip().startswith("https://is.gd/"):
             short = r.text.strip()
             cache[url] = short
             log.info("Shortened: %s → %s", url[:70], short)
             return short
-        log.warning("TinyURL unexpected response (%d) for %s", r.status_code, url[:70])
+        log.warning("is.gd unexpected response (%d) for %s", r.status_code, url[:70])
     except Exception as e:
-        log.warning("TinyURL failed for %s: %s — using original URL", url[:70], e)
+        log.warning("is.gd failed for %s: %s — using original URL", url[:70], e)
     return url
 
 
