@@ -16,6 +16,7 @@
 [![Ollama](https://img.shields.io/badge/LLM-Ollama-black?style=flat-square&logo=ollama&logoColor=white)](https://ollama.com/)
 [![Open WebUI](https://img.shields.io/badge/UI-Open%20WebUI-343541?style=flat-square&logo=openai&logoColor=white)](https://openwebui.com/)
 [![Docker](https://img.shields.io/badge/containers-Docker-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com/)
+[![Snowflake](https://img.shields.io/badge/data-Snowflake-29B5E8?style=flat-square&logo=snowflake&logoColor=white)](https://www.snowflake.com/)
 
 <br/>
 
@@ -84,6 +85,8 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 
 **Notifier flow:** `Pi 2 (08:00 timer) → Snowflake docs + Medium → Ollama llama3.2:3b → digest HTML → ntfy (Pi 1) → iPhone / macOS`
 
+**SQL fixer flow:** `Snowflake worksheet → CALL FIX_SQL_LOCAL → External Access Integration → Tailscale Funnel → Pi 2 nginx (IP-allowlisted) → FastAPI → Ollama qwen2.5-coder:7b → fix returned to worksheet`
+
 ---
 
 ## Nodes
@@ -129,6 +132,7 @@ This stack addresses them directly: LLM inference runs on your hardware, files a
 | **davfs2** | Mounts Nextcloud (Pi 1) via WebDAV for document access |
 | **nc-knowledge-sync** | Indexes Nextcloud files into Open WebUI Knowledge Base |
 | **Snowflake notifier** | Daily digest: Snowflake news → Ollama summaries → ntfy push |
+| **Snowflake SQL Fixer** | Synchronous fallback: Snowflake calls Pi 2 directly to repair broken SQL when Cortex AI credits run out |
 
 | Component | Model |
 |---|---|
@@ -190,9 +194,35 @@ A Python script on Pi 2 runs daily at 08:00 via systemd timer. It fetches Snowfl
 
 ---
 
+### 🔧 Snowflake SQL Fixer
+
+→ [Module README](./snowflake-sql-fixer/README.md) · [Full setup guide](./snowflake-sql-fixer/guide_snowflake_sql_fixer.md)
+
+![Successful repair from Snowsight](./assets/sql-fixer-snowsight-success.jpg)
+
+*`CALL FIX_SQL_LOCAL` repairing a broken query, called live from a Snowsight worksheet*
+
+![Denied from outside Snowflake](./assets/sql-fixer-denied-403.jpg)
+
+*The same endpoint returning 403 when called from anywhere other than Snowflake's egress IPs*
+
+A synchronous fallback for when Cortex AI credits run out. A Snowflake stored procedure sends a broken query and its error message out through an External Access Integration to a tightly-scoped endpoint on Pi 2, where `qwen2.5-coder:7b` (via Ollama) repairs the SQL and returns it straight into the worksheet — entirely on hardware you own.
+
+Unlike the notifier (pull-based, zero public exposure), this one deliberately opens a narrow, IP-filtered, token-gated endpoint via Tailscale Funnel. That tradeoff — and the five layers of defense around it — is spelled out in the [module README](./snowflake-sql-fixer/README.md#security-model).
+
+| Component | Role |
+|---|---|
+| `FIX_SQL_LOCAL` | Snowflake stored procedure — calls out via External Access Integration |
+| `app/main.py` | FastAPI repair endpoint (loopback-only, bearer-token gated) |
+| `nginx/sql-fixer.conf` | PROXY-protocol front + Snowflake egress-IP allowlist |
+| `refresh_egress_allowlist.py` | Weekly pull of Snowflake's published egress ranges |
+| Tailscale Funnel | `--tls-terminated-tcp`, the only public surface, exactly one path |
+
+---
+
 ## Key Technical Solutions
 
-Three non-obvious problems that required custom solutions:
+Four non-obvious problems that required custom solutions:
 
 **1 — Mullvad + Tailscale nftables conflict**
 Mullvad regenerates its entire nftables ruleset on every reconnect and VPN location switch, silently wiping custom `tailscale0` rules. Without them, all regular TCP connections to Pi services time out (Tailscale SSH still works because it bypasses the kernel network stack). A watchdog service polls every 5 seconds and re-applies four nft rules across the input, output, and forward chains, plus the `0x6d6f6c65` split-tunnel mark rule that keeps the Tailscale coordination server reachable.
@@ -202,6 +232,9 @@ Pi 1 advertises `192.168.1.0/24` as a Tailscale subnet route. Pi 2 (running defa
 
 **3 — Open WebUI RAG from Nextcloud**
 Open WebUI's "Sync Directory" feature opens a client-side file picker — it cannot reference server-side paths like `/mnt/nextcloud`. [`nc-knowledge-sync.py`](./pi2-local-llm/scripts/nc-knowledge-sync.py) uses the REST API directly: it hashes local files, uploads new or changed ones, waits for async processing, removes deleted files from the KB, and reindexes — tracking state in a local manifest so only changes are processed on each run.
+
+**4 — Tailscale Funnel strips the source IP in HTTP mode**
+An IP-based allowlist for the SQL fixer needs to know who's calling — but Funnel's default HTTP mode terminates TLS and the backend never sees the original source IP. Switching to `--tls-terminated-tcp` mode with `--proxy-protocol=2` keeps the connection at TCP and prepends a PROXY protocol v2 header carrying the real source IP, which nginx reads via `real_ip_header proxy_protocol`. That one flag is what makes filtering by Snowflake's published egress ranges possible at all.
 
 ---
 
@@ -219,7 +252,9 @@ pi-homelab/
 │   ├── mistral_council_tax.jpg            ← Open WebUI interface (mistral:7b)
 │   ├── dentist.jpg                        ← Open WebUI interface (llama3.2:3b)
 │   ├── notifier-ios-push.jpg              ← iPhone notification screenshot
-│   └── notifier-digest-page.jpg           ← digest page screenshot
+│   ├── notifier-digest-page.jpg           ← digest page screenshot
+│   ├── sql-fixer-snowsight-success.jpg    ← successful CALL FIX_SQL_LOCAL from Snowsight
+│   └── sql-fixer-denied-403.jpg           ← same endpoint denied from outside Snowflake
 │
 ├── pi1-vpn-exit-node/
 │   ├── README.md                          ← node summary
@@ -233,25 +268,45 @@ pi-homelab/
 │   └── scripts/
 │       └── nc-knowledge-sync.py           ← Nextcloud → Open WebUI KB sync
 │
-└── snowflake-notifier/
-    ├── README.md                          ← module summary + quick reference
-    ├── guide.md                           ← complete setup guide
-    ├── notify_snowflake_releases.py       ← main script (v1.0)
-    ├── keywords.json                      ← keyword tiers (customise this)
-    ├── sources.json                       ← feed config
-    ├── snowflake-notifier.service         ← systemd oneshot service
-    ├── snowflake-notifier.timer           ← systemd daily 08:00 timer
-    ├── style.css                          ← digest stylesheet
-    └── templates/
-        ├── digest.html.j2                 ← daily digest template
-        └── index.html.j2                  ← archive index template
+├── snowflake-notifier/
+│   ├── README.md                          ← module summary + quick reference
+│   ├── guide.md                           ← complete setup guide
+│   ├── notify_snowflake_releases.py       ← main script (v1.0)
+│   ├── keywords.json                      ← keyword tiers (customise this)
+│   ├── sources.json                       ← feed config
+│   ├── snowflake-notifier.service         ← systemd oneshot service
+│   ├── snowflake-notifier.timer           ← systemd daily 08:00 timer
+│   ├── style.css                          ← digest stylesheet
+│   └── templates/
+│       ├── digest.html.j2                 ← daily digest template
+│       └── index.html.j2                  ← archive index template
+│
+└── snowflake-sql-fixer/
+    ├── README.md                          ← module summary + security model
+    ├── guide_snowflake_sql_fixer.md       ← complete setup guide
+    ├── app/
+    │   └── main.py                        ← FastAPI repair endpoint
+    ├── refresh_egress_allowlist.py        ← Pi → Snowflake egress-range puller
+    ├── nginx/
+    │   ├── sql-fixer.conf                 ← server block (PROXY protocol + allowlist)
+    │   └── sql-fixer-limits.conf          ← rate-limit zone
+    ├── systemd/
+    │   ├── sql-fixer.service
+    │   ├── sql-fixer-allowlist.service
+    │   └── sql-fixer-allowlist.timer
+    └── snowflake/
+        ├── 01_network_rule.sql
+        ├── 02_secret.sql
+        ├── 03_external_access_integration.sql
+        ├── 04_procedure.sql
+        └── 05_test_calls.sql
 ```
 
 ---
 
 ## Security
 
-Both nodes are accessible **exclusively through Tailscale** — no ports are forwarded on the router, no services are exposed to the public internet.
+Both nodes are accessible **almost exclusively through Tailscale** — no ports are forwarded on the router, and the one exception is deliberate and narrow.
 
 - 🔑 SSH key-only authentication (no passwords)
 - 🛡️ UFW deny-all inbound (SSH · Tailscale · HTTPS only)
@@ -259,7 +314,9 @@ Both nodes are accessible **exclusively through Tailscale** — no ports are for
 - 🔒 HTTPS via Tailscale-provisioned Let's Encrypt certificates (auto-renewed monthly)
 - 📁 Nextcloud WebDAV mounted read-only on Pi 2
 - 🗝️ LLM API key stored `chmod 600`
-- 🌐 No public IP exposure on either node
+- 🌐 No public IP exposure on either node, with one stated exception below
+
+**The one exception:** the Snowflake SQL Fixer module above opens a single Tailscale Funnel path on Pi 2 so Snowflake can call out to it directly. It's gated by a bearer token, filtered to Snowflake's published egress IPs, rate-limited, and answers on exactly one URL — everything else gets dropped. Full writeup in the [module's security model](./snowflake-sql-fixer/README.md#security-model).
 
 ---
 

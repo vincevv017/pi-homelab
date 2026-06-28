@@ -1,0 +1,4 @@
+CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION pi_sql_fixer_integration
+  ALLOWED_NETWORK_RULES = (pi_sql_fixer_rule)
+  ALLOWED_AUTHENTICATION_SECRETS = (pi_sql_fixer_token)
+  ENABLED = TRUE;

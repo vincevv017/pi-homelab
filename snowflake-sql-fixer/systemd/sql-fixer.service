@@ -1,0 +1,31 @@
+[Unit]
+Description=Local SQL repair endpoint (FastAPI, loopback only)
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<PI2_USERNAME>
+EnvironmentFile=/home/<PI2_USERNAME>/.config/sql-fixer/env
+WorkingDirectory=/home/<PI2_USERNAME>/sql-fixer
+ExecStart=/usr/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

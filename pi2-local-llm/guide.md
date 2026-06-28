@@ -810,6 +810,17 @@ journalctl -u nc-knowledge-sync.service --no-pager --since "1 hour ago"
 
 Tailscale HTTPS certificates are issued via Let's Encrypt and expire every **90 days**. Rather than renewing manually each quarter, a systemd timer handles it automatically.
 
+**Two cert consumers on this node.** Once the SQL-fixer Funnel is added (separate guide), Pi 2 serves the same hostname cert in two different ways, and the renewal strategy must keep **both** valid:
+
+| Consumer | Port | Cert source | Renewed by |
+|---|---|---|---|
+| Open WebUI's Docker nginx | `:443` | **File** at `/etc/tailscale/certs/<fqdn>.crt` | The script below copies the file + reloads nginx |
+| Tailscale Funnel (SQL fixer) | `:8443` | tailscaled's **internal store** | tailscaled auto-renews; the weekly `tailscale cert` call also keeps the store warm |
+
+The script renews both in one pass: copying the file feeds nginx, and the `tailscale cert` call refreshes tailscaled's internal store — which is exactly the cert the Funnel terminates TLS with on each handshake. No Funnel restart is needed; the script verifies `:8443` every run and only warns if it ever lags.
+
+> **Why weekly, not monthly (lesson from the Jun 2026 lapse).** The original timer ran `OnCalendar=monthly` (1st of the month). Let's Encrypt/tailscaled only renew inside the ~30-day pre-expiry window, so for a cert expiring on the 19th, the **only** monthly run that could renew it was the 1st — a single shot. That run no-op'd silently (the old script had no `set -e` and only logged on the changed-path), and the next run fell *after* expiry. Weekly cadence gives ~4 attempts inside the window, and `set -e` + logging-every-path makes any future miss visible in `systemctl status`.
+
 ### 8.1 Create the Renewal Script
 
 ```bash
@@ -820,26 +831,62 @@ Paste (replace `vpi5-llm.your-tailnet.ts.net` with your actual Pi 2 Tailscale ho
 
 ```bash
 #!/bin/bash
+set -euo pipefail
+
+# --- config ----------------------------------------------------------------
 HOSTNAME="vpi5-llm.your-tailnet.ts.net"
 CERT_DIR="/etc/tailscale/certs"
+COMPOSE="/home/YOUR_USERNAME/openwebui/docker-compose.yml"
+NGINX_SVC="nginx"          # docker compose service name
+FUNNEL_PORT=8443           # SQL-fixer Funnel (tailscaled-managed cert); verify only
+# ---------------------------------------------------------------------------
 
+CRT="${CERT_DIR}/${HOSTNAME}.crt"
+log() { logger -t tailscale-cert-renew "$1"; }
+
+# Work in a temp dir so `tailscale cert` never writes to / (systemd CWD).
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+cd "$WORK_DIR"
+
+# Self-throttling: real ACME renewal only inside the ~30-day window, cached
+# otherwise. Same call also refreshes tailscaled's store -> the Funnel cert.
 tailscale cert "$HOSTNAME"
 
-# Only copy + reload if the cert has actually changed
-if ! diff -q "${HOSTNAME}.crt" "${CERT_DIR}/${HOSTNAME}.crt" > /dev/null 2>&1; then
-    cp "${HOSTNAME}.crt" "${CERT_DIR}/"
-    cp "${HOSTNAME}.key" "${CERT_DIR}/"
-    chmod 640 "${CERT_DIR}/${HOSTNAME}.key"
-    docker compose -f /home/YOUR_USERNAME/openwebui/docker-compose.yml exec nginx nginx -s reload
-    logger "tailscale-cert-renew: cert renewed and nginx reloaded"
+# Replace the file cert + reload nginx only if it actually changed.
+if ! diff -q "${HOSTNAME}.crt" "$CRT" > /dev/null 2>&1; then
+    install -m 644 "${HOSTNAME}.crt" "$CRT"
+    install -m 640 "${HOSTNAME}.key" "${CERT_DIR}/${HOSTNAME}.key"
+    if docker compose -f "$COMPOSE" exec -T "$NGINX_SVC" nginx -s reload; then
+        log "file cert renewed; ${NGINX_SVC} reloaded"
+    else
+        log "file cert renewed; reload FAILED -> restarting ${NGINX_SVC}"
+        docker compose -f "$COMPOSE" restart "$NGINX_SVC"
+    fi
+else
+    log "file cert unchanged; no reload"
 fi
 
-rm -f "${HOSTNAME}.crt" "${HOSTNAME}.key"
+# Verify both consumers; warn if the running Funnel lags the file cert.
+TS_IP=$(tailscale ip -4)
+file_end=$(openssl x509 -enddate -noout -in "$CRT" | cut -d= -f2)
+fun_end=$(echo | openssl s_client -connect "${TS_IP}:${FUNNEL_PORT}" \
+          -servername "$HOSTNAME" 2>/dev/null \
+          | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+log ":443 file notAfter=${file_end}"
+log ":${FUNNEL_PORT} funnel notAfter=${fun_end:-unreachable}"
+
+if [ -n "${fun_end:-}" ] \
+   && [ "$(date -d "$fun_end" +%s)" -lt "$(date -d "$file_end" +%s)" ]; then
+    log "WARNING: funnel cert older than file cert — bounce funnel on :${FUNNEL_PORT}"
+fi
 ```
 
 ```bash
 sudo chmod +x /usr/local/bin/tailscale-cert-renew.sh
 ```
+
+> If the Funnel isn't set up yet, the two `:8443` verification lines simply log `notAfter=unreachable` and the script still succeeds — the file-cert path is independent.
 
 ### 8.2 Create the Systemd Service
 
@@ -868,11 +915,12 @@ Paste:
 
 ```ini
 [Unit]
-Description=Monthly Tailscale certificate renewal
+Description=Weekly Tailscale cert refresh (file cert + funnel store)
 
 [Timer]
-OnCalendar=monthly
+OnCalendar=Mon *-*-* 03:30:00
 Persistent=true
+RandomizedDelaySec=30min
 
 [Install]
 WantedBy=timers.target
@@ -890,17 +938,38 @@ Verify the timer is scheduled:
 
 ```bash
 systemctl list-timers | grep tailscale-cert
-# Should show next run ~1 month out
+# Should show next run on the upcoming Monday (~03:30 + randomized delay)
 ```
 
-**How it works:** `tailscale cert` requests a fresh certificate from Let's Encrypt via Tailscale's coordination server. The script compares the new cert against the one currently in `/etc/tailscale/certs/` — if they differ, it copies the new files and sends a reload signal to the Nginx container. If the cert hasn't changed (e.g. it was renewed recently), the script exits without touching anything. The `Persistent=true` flag means if the Pi was off when the timer was due, it runs at next boot.
+**How it works:** Each week the script calls `tailscale cert`, which requests a certificate from Let's Encrypt via Tailscale's coordination server. `tailscale cert` self-throttles — it only performs a real ACME renewal once the cert is inside its renewal window (~30 days before expiry) and otherwise returns the cached cert instantly, so a weekly cadence carries no rate-limit risk. The script writes into a `mktemp` workdir (cleaned by the `trap`), compares the result against the file in `/etc/tailscale/certs/`, and only when they differ does it copy the new files and reload the nginx container (`-T` so the reload works without a TTY under systemd; falls back to a container restart if reload fails). Every run logs its outcome and the live `notAfter` of both `:443` and `:8443`. `Persistent=true` means a missed run (Pi powered off) fires at next boot.
 
-**To trigger a manual renewal at any time:**
+**To trigger a manual run at any time:**
 
 ```bash
 sudo /usr/local/bin/tailscale-cert-renew.sh
-journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
+journalctl -t tailscale-cert-renew --no-pager --since "5 min ago"
 ```
+
+Expected on a healthy node with a current cert:
+
+```
+file cert unchanged; no reload
+:443 file notAfter=<date>
+:8443 funnel notAfter=<same date>
+```
+
+The `Wrote public cert to <fqdn>.crt` / `Wrote private key to …` lines printed to the terminal are `tailscale cert`'s own output writing into the temp workdir — not a stray copy into your home directory.
+
+**If the funnel-lag warning ever fires** (`:8443` older than `:443`), tailscaled's store didn't propagate to the running Funnel. Bounce it manually:
+
+```bash
+sudo tailscale funnel --tls-terminated-tcp=8443 off
+sudo tailscale funnel --bg --tls-terminated-tcp=8443 tcp://localhost:9443
+```
+
+This is intentionally **not** automated — a weekly unattended Funnel restart would briefly drop the SQL-fixer path, and auto-renew makes it unnecessary in normal operation.
+
+**Note on log retention:** Pi 2's journal churns quickly (Ollama/Open WebUI), so old renewal logs rotate out within weeks. If you need cert-renewal history to survive longer for debugging, raise `SystemMaxUse` / `MaxRetentionSec` in `/etc/systemd/journald.conf`.
 
 ---
 
@@ -1075,7 +1144,7 @@ vcgencmd measure_temp
 
 **Tailscale certificate renewal:**
 
-Handled automatically by the monthly systemd timer set up in Phase 8. To check status or trigger manually:
+Handled automatically by the weekly systemd timer set up in Phase 8. The renewal keeps **both** cert consumers current — Open WebUI's Docker nginx (`:443`, file cert) and the SQL-fixer Funnel (`:8443`, tailscaled-managed). To check status or trigger manually:
 
 ```bash
 # Check timer
@@ -1083,7 +1152,8 @@ systemctl list-timers | grep tailscale-cert
 
 # Manual trigger
 sudo /usr/local/bin/tailscale-cert-renew.sh
-journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
+journalctl -t tailscale-cert-renew --no-pager --since "5 min ago"
+# Expect: "file cert unchanged" + matching :443 / :8443 notAfter (no WARNING)
 ```
 
 **Knowledge Base sync:**
@@ -1112,7 +1182,7 @@ sudo systemctl start nc-knowledge-sync.service
 - ✅ Tailscale (WireGuard-based mesh, no port forwarding needed)
 - ✅ LAN routing fix (policy rule forces LAN traffic via eth0, bypassing Tailscale table 52)
 - ✅ Open WebUI behind Tailscale only (no public internet exposure)
-- ✅ Open WebUI HTTPS via Tailscale certificates (auto-renewed monthly via systemd timer)
+- ✅ Open WebUI HTTPS via Tailscale certificates (file cert + Funnel cert auto-renewed weekly via systemd timer, both verified each run)
 - ✅ Ollama bound to localhost (not exposed directly on network)
 - ✅ Nextcloud WebDAV mounted read-only
 - ✅ Knowledge sync API key stored with restricted permissions (chmod 600)
@@ -1144,5 +1214,5 @@ Run only one large model at a time on 16GB RAM. Ollama unloads models from memor
 
 ---
 
-**Last Updated:** March 2026 (replaced manual RAG workaround with automated API-based Knowledge Base sync from Nextcloud; added automated Tailscale certificate renewal via systemd timer)
+**Last Updated:** June 2026 (hardened Tailscale cert renewal after a June lapse: `set -e` + `mktemp`/`trap`, weekly cadence replacing monthly, `-T` nginx reload with restart fallback, copy-on-change, and per-run verification of both cert consumers — Open WebUI's `:443` file cert and the SQL-fixer Funnel's `:8443` tailscaled-managed cert)
 **Tested On:** Raspberry Pi 5 (16GB), Raspberry Pi OS Lite Bookworm (64-bit), Ollama, Open WebUI, Docker, Nginx

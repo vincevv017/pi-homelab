@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Snowflake egress IP allowlist for sql-fixer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sql-fixer/refresh-env
+ExecStart=/usr/local/bin/refresh_egress_allowlist.py
