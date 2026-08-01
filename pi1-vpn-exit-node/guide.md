@@ -248,10 +248,43 @@ sudo reboot
 
 ```bash
 ssh username@vpi5.local
-df -h
+
+# Which device is root actually on?
+findmnt /
+# Expect: /dev/nvme0n1p2
+
+# Which device did the FIRMWARE read the kernel from?
+findmnt /boot/firmware
+# Expect: /dev/nvme0n1p1
 ```
 
-You should see `/dev/nvme0n1p2` mounted as `/` with ~235GB total. The SD card can now be removed and kept as an emergency backup.
+`df -h` showing `/dev/nvme0n1p2` as `/` with ~235GB is **not sufficient** on its own. Root filesystem and boot partition are selected independently: the firmware can load a kernel from the SD card while the kernel then mounts the NVMe rootfs. That combination boots and runs normally, so nothing appears wrong — but every subsequent kernel upgrade writes to the NVMe boot partition that the firmware never reads, and the Pi keeps booting an increasingly stale kernel indefinitely.
+
+**Confirm the running kernel matches what's installed:**
+
+```bash
+uname -r
+ls -la /boot/firmware/kernel_2712.img
+dpkg -l | grep -c '^ii  linux-image'
+```
+
+The `kernel_2712.img` timestamp should be recent if you have just upgraded, and `uname -r` should match the newest installed `linux-image` package. If `uname -r` lags behind, see the Troubleshooting entry "Kernel Upgrades Install But Never Boot".
+
+**⚠️ Duplicate PARTUUIDs after the `dd` clone.** `dd` copies the MBR disk identifier byte for byte, so the SD card and the NVMe now carry *identical* PARTUUIDs — `cmdline.txt` (`root=PARTUUID=...-02`) and `/etc/fstab` (`PARTUUID=...-01`) both become ambiguous, and which device wins is not guaranteed across firmware or kernel updates. Fix it now, while the SD is still mounted and both devices are visible:
+
+```bash
+lsblk -o NAME,SIZE,PARTUUID,MOUNTPOINT
+# If mmcblk0p* and nvme0n1p* show the same PARTUUIDs, change the SD's disk ID:
+
+sudo sfdisk --disk-id /dev/mmcblk0        # note the current value first
+sudo sfdisk --disk-id /dev/mmcblk0 0x11896ab1   # any value differing from the NVMe's
+sudo partprobe /dev/mmcblk0
+lsblk -o NAME,SIZE,PARTUUID,MOUNTPOINT    # SD and NVMe must now differ
+```
+
+This is non-destructive and does not require a reboot — it rewrites four bytes of the SD's partition table and leaves both filesystems untouched. Roll back by setting the original value again.
+
+The SD card can now be removed and kept as an emergency backup. If you keep it inserted as a boot fallback, note that its `/boot/firmware` will not receive kernel upgrades — see Maintenance for how to keep it current.
 
 ---
 
@@ -1235,7 +1268,64 @@ If you enabled Mullvad without LAN sharing:
 3. Run: `mullvad lan set allow`
 4. Or: `mullvad disconnect`
 
-### NVMe Not Detected
+### Kernel Upgrades Install But Never Boot
+
+**Symptom:** `uname -r` reports an older kernel than the newest `linux-image` package installed, and has done so across multiple upgrade cycles. `apt full-upgrade` reports success every time. Nothing else appears wrong — the system boots, all services start, `df -h` shows the NVMe rootfs mounted correctly.
+
+**Cause:** the firmware is loading the kernel from a different `/boot/firmware` than the one `apt` writes to. After the Phase 2.4 `dd` clone both the SD card and the NVMe hold a bootable `/boot/firmware`, and `BOOT_ORDER` decides which one the firmware reads. If the order was never changed, or was reset by an `rpi-eeprom-update -a`, the firmware reads the SD's kernel while the kernel mounts the NVMe rootfs — a working but frozen system. Kernel security patches are downloaded and discarded indefinitely.
+
+**Diagnose:**
+
+```bash
+findmnt /boot/firmware                       # which partition apt writes to
+findmnt /                                    # which rootfs is mounted
+sudo rpi-eeprom-config | grep BOOT_ORDER     # which device boots first
+ls -la /boot/firmware/kernel_2712.img        # recent date = apt is writing here
+lsblk -o NAME,SIZE,PARTUUID,MOUNTPOINT       # duplicate PARTUUIDs?
+```
+
+`BOOT_ORDER` is read **right to left**. `0xf61` = SD first, NVMe second — the broken case. `0xf416` = NVMe, SD, USB, restart loop — correct.
+
+If both devices are present, compare the two kernels directly:
+
+```bash
+sudo mkdir -p /mnt/sdboot && sudo mount /dev/mmcblk0p1 /mnt/sdboot
+md5sum /mnt/sdboot/kernel_2712.img /boot/firmware/kernel_2712.img
+ls -la /mnt/sdboot/kernel_2712.img /boot/firmware/kernel_2712.img
+```
+
+Different hashes with an old date on the SD copy confirms it.
+
+**Fix — resolve duplicate PARTUUIDs first**, so `root=PARTUUID=` has exactly one match (see Phase 2.7), then:
+
+```bash
+sudo rpi-eeprom-config > ~/eeprom-config-backup-$(date +%F).txt
+sudo -E rpi-eeprom-config --edit
+# BOOT_ORDER=0xf416
+```
+
+**Verify the write before rebooting.** `rpi-eeprom-config` with no arguments reads the *running* config from the device tree, which does not change until the next boot — it will still show the old value even after a successful flash. Read the chip directly instead:
+
+```bash
+sudo flashrom -p linux_spi:dev=/dev/spidev10.0,spispeed=16000 -r /tmp/eeprom-readback.bin
+sudo rpi-eeprom-config /tmp/eeprom-readback.bin | grep BOOT_ORDER
+# This is authoritative. Only reboot once it shows the new value.
+```
+
+```bash
+sudo reboot
+
+# First commands back:
+findmnt /                        # must be nvme0n1p2
+uname -r                         # now the newest installed kernel
+ls -d /lib/modules/*/ | wc -l
+```
+
+Keeping SD as the fallback (`...16` rather than dropping the `1`) means a failed NVMe boot still yields a running Pi. Have a keyboard and HDMI within reach regardless.
+
+**Prevention:** Phase 2.7 and the Maintenance kernel check.
+
+
 
 1. Power off completely
 2. Reseat M.2 drive in HAT (30° angle, press down, secure with screw)
@@ -1472,6 +1562,35 @@ sudo rpi-eeprom-update
 sudo rpi-eeprom-update -a
 sudo reboot
 ```
+
+**⚠️ Re-verify `BOOT_ORDER` after every EEPROM update.** Flashing a new bootloader image can reset the config to the image's defaults, silently reverting the NVMe-first order set in Phase 2.6. The Pi keeps booting — from the SD card — so nothing appears to break, while kernel upgrades quietly stop taking effect:
+
+```bash
+sudo rpi-eeprom-config | grep BOOT_ORDER    # expect 0xf416
+findmnt /boot/firmware                       # expect /dev/nvme0n1p1
+uname -r                                     # expect the newest installed linux-image
+```
+
+**Verify the running kernel after every upgrade:**
+
+A kernel upgrade that installs correctly but never boots produces no error anywhere — `apt` succeeds, systemd is happy, and the only symptom is `uname -r` lagging behind. Make this part of the post-upgrade routine:
+
+```bash
+uname -r
+dpkg -l | grep '^ii  linux-image-6' | awk '{print $2}' | sort -V | tail -1
+# These must correspond. If uname -r is older, the firmware is booting a
+# different /boot/firmware than the one apt writes to.
+```
+
+**⚠️ If you keep the SD card as a boot fallback, do not run `apt autoremove --purge` without syncing it first.** The SD holds whatever kernel was current when it was cloned, and it boots that kernel against the NVMe rootfs — which works only while `/lib/modules/<that-version>` still exists. Purging old kernel packages removes those modules and breaks the fallback silently. Either refresh the SD boot partition first:
+
+```bash
+sudo mkdir -p /mnt/sdboot && sudo mount /dev/mmcblk0p1 /mnt/sdboot
+sudo rsync -a --delete /boot/firmware/ /mnt/sdboot/
+sudo umount /mnt/sdboot
+```
+
+or retire the SD deliberately with `sudo wipefs -a /dev/mmcblk0` and accept that recovery then requires re-flashing a card.
 
 **Automated unattended upgrades (security patches only):**
 
@@ -1977,7 +2096,7 @@ With this foundation in place, the Pi can also run:
 
 ---
 
-**Last Updated:** August 2026 (fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
+**Last Updated:** August 2026 (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
 
 **Previously:** March 2026 (added split-tunnel mark rule fix — Mullvad's nft output chain drops `0x6d6f6c65`-marked TCP traffic without an explicit accept rule, causing tailscaled to lose coordination server access; watchdog extended to self-heal split-tunnel PID and mark rule; added automated Tailscale certificate renewal via systemd timer)
 **Tested On:** Raspberry Pi 5 (4GB), Raspberry Pi OS Lite Bookworm (64-bit), Mullvad VPN, Tailscale, NextCloud 33.0, Docker, Nginx
