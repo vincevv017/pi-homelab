@@ -547,6 +547,7 @@ Add (or uncomment):
 ```
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.default.rp_filter = 0
 ```
 
 Apply:
@@ -554,6 +555,8 @@ Apply:
 ```bash
 sudo sysctl -p
 ```
+
+**Why `default.rp_filter = 0`?** Reverse path filtering drops packets whose source address doesn't match the route the kernel would use to reply. On an exit node this is wrong by design: client traffic arrives on `tailscale0` with `100.x` source addresses while the reply route points at `wg0-mullvad`, so any non-zero value silently drops it. The setup script (6.2) sets this on `tailscale0` explicitly, but per-interface sysctls are destroyed with the interface — when `tailscaled` restarts and recreates `tailscale0`, the new interface inherits from `default`. Setting the default to `0` closes that window.
 
 ### 6.2 The Setup Script
 
@@ -675,11 +678,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable exit-node-routes.service
 ```
 
-### 6.4 Mullvad nftables Watchdog
+### 6.4 Runtime State Watchdog
 
-The boot script (6.2) applies the nftables rules once at startup. However, Mullvad regenerates its nftables rules on every reconnect — including when you switch VPN locations. This wipes out the tailscale0 rules, breaking NextCloud and exit node traffic.
+The boot script (6.2) applies all routing and firewall state once at startup, as a `oneshot`. Two independent events can destroy parts of that state at runtime, and neither triggers a re-run:
 
-This watchdog service checks every 5 seconds and re-applies the rules if Mullvad has wiped them:
+| Trigger | What it destroys |
+|---|---|
+| **Mullvad reconnect** (including VPN location switches and package upgrades) | The four `tailscale0` nft rules, the `0x6d6f6c65` split-tunnel mark rule, and the split-tunnel PID list |
+| **`tailscaled` restart** (almost always a `tailscale` package upgrade) | The `100.64.0.0/10 dev tailscale0` return route in Mullvad's table, and `tailscale0`'s `rp_filter` setting — both are destroyed with the interface when it's recreated. The split-tunnel PID also becomes stale. |
+
+The second case is deceptive: `iptables` rules match on interface *name*, not index, so the mangle, NAT and FORWARD rules all survive and the configuration looks correct. Only the device-bound route and the per-interface sysctl are lost. Outbound traffic reaches the internet normally, but nothing comes back — see the Troubleshooting entry "Exit Node Traffic Dies After a `tailscale` Package Upgrade".
+
+This watchdog service checks every 5 seconds and re-applies anything that has been wiped:
 
 ```bash
 sudo nano /usr/local/bin/mullvad-nft-watchdog.sh
@@ -689,19 +699,33 @@ Paste:
 
 ```bash
 #!/bin/bash
-# Watches for Mullvad nftables regeneration and re-applies tailscale0 rules
-# Also monitors split-tunnel PID drift and the mark rule for coordination server access
-# Mullvad wipes all custom nft rules on every reconnect/location switch
+# Watchdog for exit node runtime state.
+#
+# Guards against two independent events, either of which silently breaks
+# exit node traffic without restarting exit-node-routes.service:
+#
+#   1. Mullvad reconnect / location switch / package upgrade
+#      → wipes all custom nft rules and can clear the split-tunnel list
+#   2. tailscaled restart (package upgrade)
+#      → recreates tailscale0, destroying the device-bound return route
+#        and resetting the per-interface rp_filter
+#
+# nft and ip errors are sent to the journal rather than /dev/null: a failed
+# re-apply must be distinguishable from a successful one.
+
+MULLVAD_TABLE=1836018789   # Mullvad's routing table (created dynamically on connect)
 
 while true; do
     # --- Check tailscale0 output rule ---
     if ! nft list chain inet mullvad output 2>/dev/null | grep -q 'tailscale0'; then
         # Rules were wiped — re-apply all four
-        nft add rule inet mullvad input iifname "tailscale0" accept 2>/dev/null
-        nft insert rule inet mullvad output oifname "tailscale0" accept 2>/dev/null
-        nft insert rule inet mullvad forward iifname "tailscale0" accept 2>/dev/null
-        nft insert rule inet mullvad forward oifname "tailscale0" accept 2>/dev/null
-        logger "mullvad-nft-watchdog: re-applied tailscale0 nft rules"
+        {
+            nft add rule inet mullvad input iifname "tailscale0" accept
+            nft insert rule inet mullvad output oifname "tailscale0" accept
+            nft insert rule inet mullvad forward iifname "tailscale0" accept
+            nft insert rule inet mullvad forward oifname "tailscale0" accept
+        } 2>&1 | logger -t mullvad-nft-watchdog
+        logger -t mullvad-nft-watchdog "re-applied tailscale0 nft rules"
     fi
 
     # --- Check split-tunnel mark rule ---
@@ -709,25 +733,50 @@ while true; do
     # WireGuard handshake. This rule ensures all split-tunnel traffic (including
     # tailscaled's TCP to login.tailscale.com) can exit via eth0.
     if ! nft list chain inet mullvad output 2>/dev/null | grep -q 'meta mark 0x6d6f6c65 accept'; then
-        nft insert rule inet mullvad output meta mark 0x6d6f6c65 accept 2>/dev/null
-        logger "mullvad-nft-watchdog: re-applied split-tunnel mark rule"
+        nft insert rule inet mullvad output meta mark 0x6d6f6c65 accept \
+            2>&1 | logger -t mullvad-nft-watchdog
+        logger -t mullvad-nft-watchdog "re-applied split-tunnel mark rule"
+    fi
+
+    # --- Check Tailscale return route and rp_filter ---
+    # tailscaled restarts (package upgrades) recreate tailscale0. The kernel
+    # deletes device-bound routes along with the old interface, and per-interface
+    # sysctls reset to the 'default' value. Without the return route, replies
+    # arriving on wg0-mullvad find only "default dev wg0-mullvad" in Mullvad's
+    # table and loop back into the tunnel instead of reaching the client.
+    # The ip link guard avoids error spam during the restart window.
+    if ip link show tailscale0 >/dev/null 2>&1; then
+        if ! ip route show table "$MULLVAD_TABLE" 2>/dev/null | grep -q '100.64.0.0/10'; then
+            ip route add 100.64.0.0/10 dev tailscale0 table "$MULLVAD_TABLE" \
+                2>&1 | logger -t mullvad-nft-watchdog
+            logger -t mullvad-nft-watchdog "re-applied Tailscale return route"
+        fi
+        if [ "$(cat /proc/sys/net/ipv4/conf/tailscale0/rp_filter 2>/dev/null)" != "0" ]; then
+            sysctl -qw net.ipv4.conf.tailscale0.rp_filter=0
+            logger -t mullvad-nft-watchdog "reset tailscale0 rp_filter to 0"
+        fi
     fi
 
     # --- Check split-tunnel PID ---
-    # Mullvad updates or reconnects can silently clear the split-tunnel list.
-    # If tailscaled is not excluded, it can't reach the coordination server.
+    # Mullvad updates or reconnects can silently clear the split-tunnel list,
+    # and a tailscaled restart changes the PID. Either way, if tailscaled is not
+    # excluded it can't reach the coordination server.
     TSPID=$(pgrep tailscaled || true)
     if [ -n "$TSPID" ]; then
         if ! mullvad split-tunnel list | grep -q "$TSPID"; then
             mullvad split-tunnel clear 2>/dev/null || true
             mullvad split-tunnel add "$TSPID" 2>/dev/null || true
-            logger "mullvad-nft-watchdog: re-applied split-tunnel for tailscaled PID $TSPID"
+            logger -t mullvad-nft-watchdog "re-applied split-tunnel for tailscaled PID $TSPID"
         fi
     fi
 
     sleep 5
 done
 ```
+
+**Note on the `rp_filter` check:** it reads `/proc` directly rather than parsing `sysctl` output, which avoids spawning a subshell every 5 seconds on a loop that runs 17,280 times a day.
+
+**Note on CPU cost:** `systemctl status` will report a startling cumulative figure — around 2 hours of CPU after a fortnight of uptime. That is ~30ms per iteration, or **0.6% of one core**, and it is fork overhead spread evenly across the loop's ~11 child processes; measured individually, `mullvad split-tunnel list` and `nft list chain` each cost 3ms. There is no hot spot worth optimising, and throttling any single check buys ~10% of an already negligible number. The interval and the fork count are the only real levers, and neither is worth trading the script's simplicity for.
 
 ```bash
 sudo chmod +x /usr/local/bin/mullvad-nft-watchdog.sh
@@ -743,7 +792,7 @@ Paste:
 
 ```ini
 [Unit]
-Description=Watchdog: re-apply Tailscale nft rules after Mullvad reconnects
+Description=Watchdog: re-apply exit node state after Mullvad or tailscaled restarts
 After=mullvad-daemon.service tailscaled.service
 
 [Service]
@@ -782,9 +831,35 @@ sudo nft list chain inet mullvad output | grep "0x6d6f6c65 accept"
 mullvad split-tunnel list
 # Should show the tailscaled PID
 
-journalctl -u mullvad-nft-watchdog --no-pager --since "1 min ago"
+journalctl -t mullvad-nft-watchdog --no-pager --since "1 min ago"
 # Should show re-applied messages for each rule that was wiped
 ```
+
+**⚠️ Use `journalctl -t`, not `journalctl -u`, for these messages.** `logger` writes to `/dev/log` directly rather than to the service's stdout, so journald records the entries under the syslog identifier, not the unit. `journalctl -u mullvad-nft-watchdog` shows only systemd's own start/stop lines and any stdout the script's child processes emit — it will look empty even when the watchdog is working correctly. Use `-u` to check whether the service is *running*, `-t` to check what it has *done*.
+
+**Verify the tailscaled restart path** — this is the second, independent trigger, so test it separately:
+
+```bash
+sudo systemctl restart tailscaled
+sleep 10
+
+# Return route restored?
+ip route show table 1836018789 | grep 100.64
+# Should show: 100.64.0.0/10 dev tailscale0 scope link
+
+# rp_filter reset?
+sysctl net.ipv4.conf.tailscale0.rp_filter
+# Should show: 0
+
+# PID re-synced?
+mullvad split-tunnel list && pgrep tailscaled
+# Both should show the same PID
+
+journalctl -t mullvad-nft-watchdog --no-pager --since "1 min ago"
+# Should show: re-applied Tailscale return route / reset tailscale0 rp_filter
+```
+
+Then confirm end to end from a client with the exit node selected — `curl -s https://am.i.mullvad.net/connected` should report the connected relay.
 
 ---
 
@@ -902,7 +977,7 @@ sudo ip route get 8.8.8.8 from 100.y.y.y iif tailscale0
 | Component | Detail |
 |---|---|
 | Mullvad routing table | `1836018789` — created dynamically when Mullvad connects |
-| Tailscale CGNAT range | `100.64.0.0/10` — all Tailscale device IPs |
+| Tailscale CGNAT range | `100.64.0.0/10` — all Tailscale device IPs. The return route `100.64.0.0/10 dev tailscale0` in Mullvad's table is **device-bound**, so the kernel deletes it whenever `tailscale0` is destroyed (i.e. on every `tailscaled` restart). The watchdog (6.4) restores it. |
 | Mullvad internal DNS | `10.64.0.1` — only DNS allowed by Mullvad's nftables firewall |
 | Fwmark `0x100` | Custom mark to override Tailscale's default routing |
 | Fwmark `0x6d6f6c65` | Mullvad's split-tunnel exclusion mark (ASCII for "mole") — traffic from excluded processes is routed via `eth0`, not `wg0-mullvad`. The nft output chain requires a broad `meta mark 0x6d6f6c65 accept` rule or this traffic is dropped by `policy drop`. |
@@ -999,7 +1074,7 @@ sudo tailscale status
 
 ```bash
 sudo systemctl status mullvad-nft-watchdog --no-pager
-journalctl -u mullvad-nft-watchdog --no-pager --since "5 min ago"
+journalctl -t mullvad-nft-watchdog --no-pager --since "5 min ago"
 ```
 
 
@@ -1085,7 +1160,57 @@ sudo iptables -t nat -I PREROUTING 1 -i tailscale0 -p udp --dport 53 -j DNAT --t
 sudo iptables -t nat -I PREROUTING 2 -i tailscale0 -p tcp --dport 53 -j DNAT --to-destination 10.64.0.1
 ```
 
+### Exit Node Traffic Dies After a `tailscale` Package Upgrade
+
+**Symptom:** The Tailscale mesh is entirely healthy — `tailscale status` shows all peers online, no health warnings, SSH over Tailscale works, Nextcloud loads — but no client device can reach the internet through the exit node. `mullvad status` shows `Connected`, and `iptables -t nat -L POSTROUTING -n -v` shows the `wg0-mullvad` MASQUERADE rule with a high and *increasing* packet count. Traffic is going out; nothing is coming back.
+
+**Cause:** Upgrading the `tailscale` package restarts `tailscaled`, which destroys and recreates the `tailscale0` interface. Two pieces of state die with the old interface and are never restored, because `exit-node-routes.service` is a `oneshot` that only runs at boot:
+
+1. **The return route.** `100.64.0.0/10 dev tailscale0 table 1836018789` is device-bound, and the kernel deletes device-bound routes when the device disappears. Without it, replies arriving on `wg0-mullvad` are reverse-NATed to `100.x` and then consult Mullvad's table, which now contains only `default dev wg0-mullvad` — so they loop straight back into the tunnel.
+2. **The per-interface `rp_filter`.** Per-interface sysctls are destroyed with the interface; the new `tailscale0` inherits `net.ipv4.conf.default.rp_filter`, which is `2` on Raspberry Pi OS. Even loose mode drops these packets, because with the route missing the reverse path for `100.x` resolves to `wg0-mullvad`, not `tailscale0`.
+
+What makes this hard to spot is that everything else survives. `iptables` rules match on interface *name*, not index, so the mangle mark, the MASQUERADE, the DNS DNAT and the FORWARD rules are all still present and still counting packets. The configuration inspects as correct.
+
+**Diagnose:**
+
+```bash
+# Is the return route gone?
+ip route show table 1836018789
+# Broken: only "default dev wg0-mullvad"
+# Healthy: also "100.64.0.0/10 dev tailscale0 scope link"
+
+# Has rp_filter reverted?
+sysctl net.ipv4.conf.tailscale0.rp_filter
+# Should be 0. A 1 or 2 means the interface was recreated.
+
+# Did tailscaled restart since boot? Compare the two timestamps.
+systemctl show tailscaled -p ActiveEnterTimestamp
+uptime -s
+
+# Which package did it?
+grep -iE 'tailscale' /var/log/apt/history.log | tail -5
+```
+
+**Fix:**
+
+```bash
+sudo ip route add 100.64.0.0/10 dev tailscale0 table 1836018789
+sudo sysctl -w net.ipv4.conf.tailscale0.rp_filter=0
+```
+
+Traffic resumes immediately. If a client still hangs, flush stale conntrack entries left over from the broken window:
+
+```bash
+sudo conntrack -D -s 100.64.0.0/10 2>/dev/null
+```
+
+**Do not** run `/usr/local/bin/exit-node-setup.sh` as the fix. It uses `iptables -A`/`-I` with no flush, so running it on a live system stacks duplicate mangle and NAT rules on top of the ones that survived.
+
+**Prevention:** Phase 6.4's watchdog monitors both conditions every 5 seconds. Phase 6.1's `net.ipv4.conf.default.rp_filter = 0` closes the few-second window between interface creation and the watchdog's next pass.
+
 ### Packets Go Out But Replies Never Come Back
+
+The generic form of the problem above — check that first if a `tailscale` upgrade happened recently.
 
 Check the return route:
 ```bash
@@ -1095,6 +1220,11 @@ ip route get 100.y.y.y
 If it shows `dev wg0-mullvad` instead of `dev tailscale0`, the return path is broken:
 ```bash
 sudo ip route add 100.64.0.0/10 dev tailscale0 table 1836018789
+```
+
+Also check `rp_filter`, which fails the same way and is easy to miss because the route can look correct while packets are still being dropped:
+```bash
+sysctl net.ipv4.conf.tailscale0.rp_filter   # must be 0
 ```
 
 ### SSH Locked Out After Mullvad Connection
@@ -1147,7 +1277,7 @@ sudo nft insert rule inet mullvad forward oifname "tailscale0" accept
 
 ```bash
 sudo systemctl status mullvad-nft-watchdog
-journalctl -u mullvad-nft-watchdog --no-pager --since "5 min ago"
+journalctl -t mullvad-nft-watchdog --no-pager --since "5 min ago"
 ```
 
 ### NextCloud Unreachable From Tailscale Devices
@@ -1215,8 +1345,10 @@ curl -s ifconfig.me             # External IP (should be VPN)
 
 # === Routing ===
 ip rule show                    # Policy routing rules
-ip route show table 1836018789  # Mullvad's routing table
+ip route show table 1836018789  # Mullvad's routing table (needs 100.64.0.0/10 dev tailscale0)
 ip route show table 52          # Tailscale's routing table
+sysctl net.ipv4.conf.tailscale0.rp_filter    # must be 0
+systemctl show tailscaled -p ActiveEnterTimestamp && uptime -s  # did tailscaled restart post-boot?
 sudo ip route get 8.8.8.8 from 100.y.y.y iif tailscale0  # Test packet path
 
 # === Firewall ===
@@ -1241,7 +1373,7 @@ sudo systemctl status mullvad-nft-watchdog --no-pager
 sudo nft list chain inet mullvad output | head -10  # Check tailscale0 rules
 sudo nft list chain inet mullvad forward | head -10  # Check tailscale0 rules
 sudo nft list chain inet mullvad input | head -20    # Input chain rules
-journalctl -u mullvad-nft-watchdog --no-pager --since "1 hour ago"  # Watchdog activity
+journalctl -t mullvad-nft-watchdog --no-pager --since "1 hour ago"  # Watchdog activity
 
 # === Docker / NextCloud ===
 docker ps                                             # Running containers
@@ -1266,7 +1398,7 @@ sudo fail2ban-client status sshd
 - ✅ Encrypted DNS via Mullvad (10.64.0.1) — no DNS leaks
 - ✅ Tailscale (WireGuard-based mesh, no port forwarding needed)
 - ✅ Mullvad nftables patched (tailscale0 allowed in input, output & forward chains)
-- ✅ Mullvad nft watchdog (auto re-applies nft rules, split-tunnel PID, and mark rule on VPN location switch/reconnect/update)
+- ✅ Runtime state watchdog (auto re-applies nft rules, mark rule, split-tunnel PID, Tailscale return route, and `rp_filter` after Mullvad reconnects *or* tailscaled restarts)
 - ✅ Split-tunnel for tailscaled (control plane bypasses VPN)
 - ✅ LAN sharing enabled (prevents SSH lockout)
 - ✅ NextCloud behind Tailscale only (no public internet exposure)
@@ -1288,7 +1420,7 @@ systemctl list-timers | grep tailscale-cert
 
 # Manual trigger
 sudo /usr/local/bin/tailscale-cert-renew.sh
-journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
+journalctl -t tailscale-cert-renew --no-pager --since "5 min ago"
 ```
 
 ### Keeping the System Up to Date
@@ -1367,7 +1499,33 @@ sudo apt update
 sudo apt install --only-upgrade mullvad-vpn tailscale
 ```
 
-After major Mullvad or Tailscale updates, reboot and verify the exit-node-routes service starts correctly:
+**⚠️ A `tailscale` package upgrade restarts `tailscaled` and breaks the exit node** until the watchdog heals it or you reboot. This happens on any `apt full-upgrade` that includes Tailscale, not just deliberate Tailscale updates. Run this check after every upgrade — no reboot required:
+
+```bash
+# Return route present?
+ip route show table 1836018789 | grep 100.64
+
+# rp_filter still 0?
+sysctl net.ipv4.conf.tailscale0.rp_filter
+
+# Split-tunnel PID matches the running daemon?
+mullvad split-tunnel list && pgrep tailscaled
+
+# nft rules intact?
+sudo nft list chain inet mullvad output | grep -E 'tailscale0|0x6d6f6c65'
+
+# End to end, from a client with the exit node selected:
+#   curl -s https://am.i.mullvad.net/connected
+```
+
+If any of these are missing, the watchdog (Phase 6.4) should have restored them within 5 seconds — so a failure here means the watchdog itself needs attention:
+
+```bash
+systemctl is-active mullvad-nft-watchdog
+journalctl -t mullvad-nft-watchdog --no-pager --since "10 min ago"
+```
+
+After a kernel upgrade, reboot as usual and verify the boot chain:
 
 ```bash
 sudo reboot
@@ -1702,9 +1860,9 @@ if ! diff -q "${HOSTNAME}.crt" "${CERT_DIR}/${HOSTNAME}.crt" > /dev/null 2>&1; t
     cp "${HOSTNAME}.key" "${CERT_DIR}/"
     chmod 640 "${CERT_DIR}/${HOSTNAME}.key"
     docker compose -f /home/YOUR_USERNAME/nextcloud/docker-compose.yml exec nginx nginx -s reload
-    logger "tailscale-cert-renew: cert renewed and nginx reloaded"
+    logger -t tailscale-cert-renew "cert renewed and nginx reloaded"
 else
-    logger "tailscale-cert-renew: cert unchanged, no reload needed"
+    logger -t tailscale-cert-renew "cert unchanged, no reload needed"
 fi
 ```
 
@@ -1778,14 +1936,14 @@ echo | openssl s_client \
 
 ```bash
 sudo /usr/local/bin/tailscale-cert-renew.sh
-journalctl -u tailscale-cert-renew --no-pager --since "5 min ago"
+journalctl -t tailscale-cert-renew --no-pager --since "5 min ago"
 ```
 
 **Monthly check — verify the timer ran and the cert is healthy:**
 
 ```bash
 # Did the timer fire and what did it log?
-journalctl | grep tailscale-cert-renew
+journalctl -t tailscale-cert-renew --no-pager --since "5 weeks ago"
 
 # Is the cert still valid?
 echo | openssl s_client \
@@ -1819,5 +1977,7 @@ With this foundation in place, the Pi can also run:
 
 ---
 
-**Last Updated:** March 2026 (added split-tunnel mark rule fix — Mullvad's nft output chain drops `0x6d6f6c65`-marked TCP traffic without an explicit accept rule, causing tailscaled to lose coordination server access; watchdog extended to self-heal split-tunnel PID and mark rule; added automated Tailscale certificate renewal via systemd timer)
+**Last Updated:** August 2026 (fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
+
+**Previously:** March 2026 (added split-tunnel mark rule fix — Mullvad's nft output chain drops `0x6d6f6c65`-marked TCP traffic without an explicit accept rule, causing tailscaled to lose coordination server access; watchdog extended to self-heal split-tunnel PID and mark rule; added automated Tailscale certificate renewal via systemd timer)
 **Tested On:** Raspberry Pi 5 (4GB), Raspberry Pi OS Lite Bookworm (64-bit), Mullvad VPN, Tailscale, NextCloud 33.0, Docker, Nginx
