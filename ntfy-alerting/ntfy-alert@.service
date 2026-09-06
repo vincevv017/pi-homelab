@@ -1,0 +1,6 @@
+[Unit]
+Description=ntfy failure alert for %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ntfy-alert.sh %i

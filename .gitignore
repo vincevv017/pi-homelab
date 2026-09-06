@@ -1,1 +1,4 @@
 .venv/
+ntfy-alert.env
+*.env
+!*.env.example

@@ -1,0 +1,6 @@
+# Deploy to /etc/systemd/system/<unit>.service.d/onfailure.conf
+#
+# %N is the unit name WITHOUT the .service suffix. Using %n yields
+# ntfy-alert@<unit>.service.service, which systemd rejects at start time.
+[Unit]
+OnFailure=ntfy-alert@%N.service

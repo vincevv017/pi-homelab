@@ -696,12 +696,28 @@ Wants=mullvad-daemon.service tailscaled.service network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=240
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do mullvad status | grep -q "Connected" && exit 0; sleep 2; done; exit 1'
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do ip link show tailscale0 >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1'
 ExecStart=/usr/local/bin/exit-node-setup.sh
 
 [Install]
 WantedBy=multi-user.target
+```
+
+**On `TimeoutStartSec=240`.** `exit-node-setup.sh` calls `tailscale up`, which blocks indefinitely when `tailscaled` cannot reach the coordination server — either because the `0x6d6f6c65` mark rule was wiped from Mullvad's output chain (Phase 6.4) or because the node key expired. Without a bound, the unit sits in `activating` forever instead of failing, and no `OnFailure=` handler ever fires.
+
+The value covers the **whole** start sequence, pre-checks included. The two `ExecStartPre` loops budget 90 seconds between them (60s Mullvad + 30s `tailscale0`), so 120 would leave only 30 seconds for `ExecStart` and cause spurious failures on slow Mullvad reconnects. 240 gives the pre-checks their full budget with real margin.
+
+If the unit is already deployed, add it as a drop-in rather than editing the file — the original stays untouched and reverting is `rm` plus `daemon-reload`:
+
+```bash
+sudo mkdir -p /etc/systemd/system/exit-node-routes.service.d
+printf '[Service]\nTimeoutStartSec=240\n' \
+  | sudo tee /etc/systemd/system/exit-node-routes.service.d/timeout.conf > /dev/null
+sudo systemctl daemon-reload
+systemctl show exit-node-routes.service -p TimeoutStartUSec
+# Expect: TimeoutStartUSec=4min
 ```
 
 Enable it:
@@ -2128,6 +2144,60 @@ journalctl -t tailscale-cert-renew --no-pager --since "5 weeks ago"
 
 ---
 
+## Phase 11: Failure Alerting via ntfy
+
+Every unattended unit on this node is a `oneshot` on a timer. Without alerting, a failed run is silent — the June 2026 certificate lapse only surfaced because notifications stopped arriving, days later.
+
+A shared `OnFailure=` handler pushes any unit failure to a phone, with the last 15 journal lines attached. Full setup, design notes and troubleshooting live in [`../ntfy-alerting/README.md`](../ntfy-alerting/README.md); this section covers only what is specific to this node.
+
+**Units wired up here:**
+
+| Unit | Failure mode it catches |
+|---|---|
+| `tailscale-cert-renew.service` | Renewal failed, or nginx reload did not take |
+| `exit-node-routes.service` | Mullvad not connected, `tailscale0` missing, or `tailscale up` timed out |
+
+**Deploy:**
+
+```bash
+# from the repo
+sudo install -m 755 ntfy-alerting/ntfy-alert.sh /usr/local/bin/ntfy-alert.sh
+sudo install -m 644 ntfy-alerting/ntfy-alert@.service /etc/systemd/system/ntfy-alert@.service
+sudo install -m 600 ntfy-alerting/ntfy-alert.env.example /etc/ntfy-alert.env
+sudo nano /etc/ntfy-alert.env          # set the URL and token for this node
+sudo systemctl daemon-reload
+```
+
+> This node **hosts** ntfy, so the alert must go over loopback with certificate validation disabled:
+>
+> ```
+> NTFY_ALERT_URL="https://127.0.0.1:8443/homelab_alerts"
+> NTFY_CURL_OPTS="-k"
+> ```
+>
+> That is the whole point. If the alert path went through the Tailscale FQDN, an expired certificate — the most likely thing to need alerting about — would also break the alert.
+
+**Wire the units:**
+
+```bash
+for u in tailscale-cert-renew exit-node-routes; do
+  sudo mkdir -p /etc/systemd/system/$u.service.d
+  printf '[Unit]\nOnFailure=ntfy-alert@%%N.service\n' \
+    | sudo tee /etc/systemd/system/$u.service.d/onfailure.conf > /dev/null
+done
+sudo systemctl daemon-reload
+systemctl show tailscale-cert-renew.service -p OnFailure
+systemctl show exit-node-routes.service -p OnFailure
+```
+
+Each should print `OnFailure=ntfy-alert@<unit>.service` with a **single** `.service` suffix. Use `%N`, not `%n` — `%n` includes the suffix and produces the malformed instance `ntfy-alert@<unit>.service.service`, which systemd rejects at start time rather than at `daemon-reload`.
+
+**Verify:** see the test procedure in the alerting README. Note that `systemd-run --property=OnFailure=...` does not work, because specifiers are not expanded in transient properties; the test needs a real unit file.
+
+**What this does not catch:** a unit that never runs at all. A disabled timer or a powered-off node produces no failure and therefore no alert.
+
+---
+
 ## Next Steps
 
 With this foundation in place, the Pi can also run:
@@ -2149,7 +2219,7 @@ With this foundation in place, the Pi can also run:
 
 ---
 
-**Last Updated:** September 2026 (cert renewal moved from monthly to weekly on both nodes — the monthly cadence allowed only a single renewal attempt inside Let's Encrypt's 30-day window, and the August 2026 run landed roughly one hour before expiry; Phase 10 script hardened to `set -euo pipefail`, `install`, `docker compose exec -T` with restart fallback, and per-port verification logging of `notAfter` for `:443` and `:8443`; `TimeoutStartSec=120` added to the service so an expired node key surfaces as a failure instead of an indefinite hang; nginx `:8443` `server_name` placeholder replaced with the real FQDN; `--resolve` documented for local curl checks since MagicDNS does not resolve a node's own FQDN. Earlier: August 2026 changes: (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
+**Last Updated:** September 2026 (added ntfy failure alerting — a shared `OnFailure=` handler pushes unit failures to a phone with the last 15 journal lines attached, wired to `tailscale-cert-renew` and `exit-node-routes`, using a loopback URL so the alert path survives a broken certificate; `TimeoutStartSec=240` added to `exit-node-routes.service` so a blocked `tailscale up` fails visibly instead of hanging in `activating` forever, which also lets `OnFailure=` fire. Earlier: September 2026 (cert renewal moved from monthly to weekly on both nodes — the monthly cadence allowed only a single renewal attempt inside Let's Encrypt's 30-day window, and the August 2026 run landed roughly one hour before expiry; Phase 10 script hardened to `set -euo pipefail`, `install`, `docker compose exec -T` with restart fallback, and per-port verification logging of `notAfter` for `:443` and `:8443`; `TimeoutStartSec=120` added to the service so an expired node key surfaces as a failure instead of an indefinite hang; nginx `:8443` `server_name` placeholder replaced with the real FQDN; `--resolve` documented for local curl checks since MagicDNS does not resolve a node's own FQDN. Earlier: August 2026 changes: (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
 
 **Previously:** March 2026 (added split-tunnel mark rule fix — Mullvad's nft output chain drops `0x6d6f6c65`-marked TCP traffic without an explicit accept rule, causing tailscaled to lose coordination server access; watchdog extended to self-heal split-tunnel PID and mark rule; added automated Tailscale certificate renewal via systemd timer)
 **Tested On:** Raspberry Pi 5 (4GB), Raspberry Pi OS Lite Bookworm (64-bit), Mullvad VPN, Tailscale, NextCloud 33.0, Docker, Nginx

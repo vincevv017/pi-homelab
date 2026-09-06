@@ -976,6 +976,60 @@ This is intentionally **not** automated — a weekly unattended Funnel restart w
 
 ---
 
+## Phase 9: Failure Alerting via ntfy
+
+Every unattended unit on this node is a `oneshot` on a timer. Without alerting, a failed run is silent — the June 2026 certificate lapse only surfaced because notifications stopped arriving, days later.
+
+A shared `OnFailure=` handler pushes any unit failure to a phone, with the last 15 journal lines attached. Full setup, design notes and troubleshooting live in [`../ntfy-alerting/README.md`](../ntfy-alerting/README.md); this section covers only what is specific to this node.
+
+**Units wired up here:**
+
+| Unit | Failure mode it catches |
+|---|---|
+| `tailscale-cert-renew.service` | Renewal failed, or the Funnel cert lags the file cert |
+| `snowflake-notifier.service` | Fetch, summarisation, or the ntfy POST failed |
+
+**Deploy:**
+
+```bash
+# from the repo
+sudo install -m 755 ntfy-alerting/ntfy-alert.sh /usr/local/bin/ntfy-alert.sh
+sudo install -m 644 ntfy-alerting/ntfy-alert@.service /etc/systemd/system/ntfy-alert@.service
+sudo install -m 600 ntfy-alerting/ntfy-alert.env.example /etc/ntfy-alert.env
+sudo nano /etc/ntfy-alert.env          # set the URL and token for this node
+sudo systemctl daemon-reload
+```
+
+> This node reaches ntfy on Pi 1 over the tailnet:
+>
+> ```
+> NTFY_ALERT_URL="https://<pi1-hostname>.<tailnet>.ts.net/ntfy/homelab_alerts"
+> NTFY_CURL_OPTS=""
+> ```
+>
+> This path depends on Pi 1 being up and its certificate valid. Pi 1 alerts on its own failures over loopback, so the two nodes do not share a single point of failure for alerting.
+
+**Wire the units:**
+
+```bash
+for u in tailscale-cert-renew snowflake-notifier; do
+  sudo mkdir -p /etc/systemd/system/$u.service.d
+  printf '[Unit]\nOnFailure=ntfy-alert@%%N.service\n' \
+    | sudo tee /etc/systemd/system/$u.service.d/onfailure.conf > /dev/null
+done
+sudo systemctl daemon-reload
+systemctl show tailscale-cert-renew.service -p OnFailure
+systemctl show snowflake-notifier.service -p OnFailure
+```
+
+Each should print `OnFailure=ntfy-alert@<unit>.service` with a **single** `.service` suffix. Use `%N`, not `%n` — `%n` includes the suffix and produces the malformed instance `ntfy-alert@<unit>.service.service`, which systemd rejects at start time rather than at `daemon-reload`.
+
+**Verify:** see the test procedure in the alerting README. Note that `systemd-run --property=OnFailure=...` does not work, because specifiers are not expanded in transient properties; the test needs a real unit file.
+
+**What this does not catch:** a unit that never runs at all. A disabled timer or a powered-off node produces no failure and therefore no alert.
+
+---
+
 ## Architecture
 
 ```
@@ -1217,5 +1271,5 @@ Run only one large model at a time on 16GB RAM. Ollama unloads models from memor
 
 ---
 
-**Last Updated:** June 2026 (hardened Tailscale cert renewal after a June lapse: `set -e` + `mktemp`/`trap`, weekly cadence replacing monthly, `-T` nginx reload with restart fallback, copy-on-change, and per-run verification of both cert consumers — Open WebUI's `:443` file cert and the SQL-fixer Funnel's `:8443` tailscaled-managed cert)
+**Last Updated:** September 2026 (added ntfy failure alerting via a shared `OnFailure=` handler, wired to `tailscale-cert-renew` and `snowflake-notifier`; `TimeoutStartSec=120` added to the cert renewal service so an expired node key surfaces as a failure rather than an indefinite hang. Earlier: June 2026 (hardened Tailscale cert renewal after a June lapse: `set -e` + `mktemp`/`trap`, weekly cadence replacing monthly, `-T` nginx reload with restart fallback, copy-on-change, and per-run verification of both cert consumers — Open WebUI's `:443` file cert and the SQL-fixer Funnel's `:8443` tailscaled-managed cert)
 **Tested On:** Raspberry Pi 5 (16GB), Raspberry Pi OS Lite Bookworm (64-bit), Ollama, Open WebUI, Docker, Nginx
