@@ -902,8 +902,11 @@ Description=Renew Tailscale HTTPS certificate
 
 [Service]
 Type=oneshot
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/tailscale-cert-renew.sh
 ```
+
+`TimeoutStartSec=120` guards against an expired node key: tailscaled sits in `NeedsLogin`, `tailscale cert` blocks indefinitely, and without the timeout the unit hangs in `activating` forever instead of failing visibly. Disable key expiry on both nodes in the Tailscale admin console as well.
 
 ### 8.3 Create the Systemd Timer
 

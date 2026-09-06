@@ -1492,7 +1492,7 @@ sudo fail2ban-client status sshd
 - ✅ Split-tunnel for tailscaled (control plane bypasses VPN)
 - ✅ LAN sharing enabled (prevents SSH lockout)
 - ✅ NextCloud behind Tailscale only (no public internet exposure)
-- ✅ NextCloud HTTPS via Tailscale certificates (auto-renewed monthly via systemd timer)
+- ✅ NextCloud HTTPS via Tailscale certificates (auto-renewed weekly via systemd timer)
 - ✅ NVMe boot (reliable, fast storage)
 - ✅ Active cooling (temperature-controlled)
 
@@ -1502,7 +1502,7 @@ sudo fail2ban-client status sshd
 
 **Tailscale certificate renewal:**
 
-Handled automatically by the monthly systemd timer set up in Phase 10. To check status or trigger manually:
+Handled automatically by the weekly systemd timer set up in Phase 10 (Mondays 04:30, randomized). To check status or trigger manually:
 
 ```bash
 # Check timer
@@ -1952,7 +1952,18 @@ docker exec -u www-data nextcloud-nextcloud-1 php occ config:system:get trusted_
 
 ## Phase 10: Tailscale Certificate Renewal
 
-Tailscale HTTPS certificates are issued via Let's Encrypt and expire every **90 days**. Rather than renewing manually each quarter, a systemd timer handles it automatically.
+Tailscale HTTPS certificates are issued via Let's Encrypt and expire every **90 days**. A weekly systemd timer keeps them current without manual intervention.
+
+**Two cert consumers on this node**, both served by the same Docker nginx container and the same file cert:
+
+| Consumer | Port | Backend | Cert source |
+|---|---|---|---|
+| NextCloud | `:443` | `nextcloud:80` | File at `/etc/tailscale/certs/<fqdn>.crt` |
+| ntfy | `:443/ntfy/` and `:8443/` | `ntfy:80` | Same file cert |
+
+Because a single container terminates TLS for every port, **one reload covers all consumers**. The script still verifies each port independently, so a reload that silently fails to take is visible in the journal.
+
+> **Why weekly, not monthly.** The original timer ran `OnCalendar=monthly`. Let's Encrypt and tailscaled only renew inside the ~30-day pre-expiry window, so for a cert expiring on the 31st the **only** monthly run that could renew it was the 1st: a single shot. In August 2026 that shot landed at 22:00 UTC on the expiry day itself, roughly one hour of margin on a 90-day cert. Nothing broke, but only because no notification happened to be sent during the gap. Weekly cadence gives ~4 attempts inside the window, and `set -euo pipefail` plus logging on every code path makes any future miss visible in `systemctl status`.
 
 ### 10.1 Create the Renewal Script
 
@@ -1960,34 +1971,68 @@ Tailscale HTTPS certificates are issued via Let's Encrypt and expire every **90 
 sudo nano /usr/local/bin/tailscale-cert-renew.sh
 ```
 
-Paste (replace `vpi5.your-tailnet.ts.net` with your actual Pi 1 Tailscale hostname, and `YOUR_USERNAME` with your Pi username):
+Paste (replace `<hostname>.<tailnet>.ts.net` with your Pi 1 Tailscale FQDN and `YOUR_USERNAME` with your Pi username):
 
 ```bash
 #!/bin/bash
-set -e
+set -euo pipefail
 
-HOSTNAME="vpi5.your-tailnet.ts.net"
+# --- config ----------------------------------------------------------------
+HOSTNAME="<hostname>.<tailnet>.ts.net"
 CERT_DIR="/etc/tailscale/certs"
-WORK_DIR=$(mktemp -d)
-trap "rm -rf $WORK_DIR" EXIT
+COMPOSE="/home/YOUR_USERNAME/nextcloud/docker-compose.yml"
+NGINX_SVC="nginx"          # single container fronting :443 (NextCloud) and :8443 (ntfy)
+PORTS=(443 8443)           # both terminate with the same file cert
+# ---------------------------------------------------------------------------
 
+CRT="${CERT_DIR}/${HOSTNAME}.crt"
+log() { logger -t tailscale-cert-renew "$1"; }
+
+# Work in a temp dir so `tailscale cert` never writes to / (systemd CWD).
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
 cd "$WORK_DIR"
+
+# Self-throttling: real ACME renewal only inside the ~30-day window,
+# cached copy returned instantly otherwise. Safe to call weekly.
 tailscale cert "$HOSTNAME"
 
-if ! diff -q "${HOSTNAME}.crt" "${CERT_DIR}/${HOSTNAME}.crt" > /dev/null 2>&1; then
-    cp "${HOSTNAME}.crt" "${CERT_DIR}/"
-    cp "${HOSTNAME}.key" "${CERT_DIR}/"
-    chmod 640 "${CERT_DIR}/${HOSTNAME}.key"
-    docker compose -f /home/YOUR_USERNAME/nextcloud/docker-compose.yml exec nginx nginx -s reload
-    logger -t tailscale-cert-renew "cert renewed and nginx reloaded"
+if ! diff -q "${HOSTNAME}.crt" "$CRT" > /dev/null 2>&1; then
+    install -m 644 "${HOSTNAME}.crt" "$CRT"
+    install -m 640 "${HOSTNAME}.key" "${CERT_DIR}/${HOSTNAME}.key"
+    if docker compose -f "$COMPOSE" exec -T "$NGINX_SVC" nginx -s reload; then
+        log "file cert renewed; ${NGINX_SVC} reloaded"
+    else
+        log "file cert renewed; reload FAILED -> restarting ${NGINX_SVC}"
+        docker compose -f "$COMPOSE" restart "$NGINX_SVC"
+    fi
 else
-    logger -t tailscale-cert-renew "cert unchanged, no reload needed"
+    log "file cert unchanged; no reload"
 fi
+
+# Verify every consumer against the on-disk cert; warn on any that lags.
+TS_IP=$(tailscale ip -4)
+file_end=$(openssl x509 -enddate -noout -in "$CRT" | cut -d= -f2)
+log "file notAfter=${file_end}"
+
+for p in "${PORTS[@]}"; do
+    served=$(echo | openssl s_client -connect "${TS_IP}:${p}" \
+             -servername "$HOSTNAME" 2>/dev/null \
+             | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+    log ":${p} served notAfter=${served:-unreachable}"
+    if [ -n "${served:-}" ] \
+       && [ "$(date -d "$served" +%s)" -lt "$(date -d "$file_end" +%s)" ]; then
+        log "WARNING: :${p} serving an older cert than the file — reload did not take"
+    fi
+done
 ```
 
 ```bash
 sudo chmod +x /usr/local/bin/tailscale-cert-renew.sh
+sudo bash -n /usr/local/bin/tailscale-cert-renew.sh && echo "syntax OK"
 ```
+
+The `bash -n` check matters: pasting a long heredoc over SSH can truncate silently, and a truncated script that still parses will fail at the worst possible moment.
 
 ### 10.2 Create the Systemd Service
 
@@ -2003,8 +2048,11 @@ Description=Renew Tailscale HTTPS certificate
 
 [Service]
 Type=oneshot
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/tailscale-cert-renew.sh
 ```
+
+`TimeoutStartSec=120` is not optional. If the node key has expired, tailscaled sits in `NeedsLogin` and `tailscale cert` blocks indefinitely. Without a timeout the unit hangs forever in `activating` instead of failing, and nothing surfaces the problem.
 
 ### 10.3 Create the Systemd Timer
 
@@ -2016,62 +2064,67 @@ Paste:
 
 ```ini
 [Unit]
-Description=Monthly Tailscale certificate renewal
+Description=Weekly Tailscale cert refresh (nginx :443 + :8443)
 
 [Timer]
-OnCalendar=monthly
+OnCalendar=Mon *-*-* 04:30:00
 Persistent=true
+RandomizedDelaySec=30min
 
 [Install]
 WantedBy=timers.target
 ```
 
+If Pi 2 runs the same timer, stagger the two so both nodes never hit the coordination server simultaneously. Pi 2 uses `03:30`; Pi 1 uses `04:30`.
+
 ### 10.4 Enable and Start
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable tailscale-cert-renew.timer
-sudo systemctl start tailscale-cert-renew.timer
-```
-
-Verify the timer is scheduled:
-
-```bash
+sudo systemctl enable --now tailscale-cert-renew.timer
 systemctl list-timers | grep tailscale-cert
 ```
 
-Verify the cert is valid and check expiry:
+Test through systemd rather than by calling the script directly, so the unit's environment (no TTY, CWD of `/`) is what actually gets exercised:
 
 ```bash
-echo | openssl s_client \
-  -connect $(tailscale ip -4):443 \
-  -servername YOUR-PI1-HOSTNAME.your-tailnet.ts.net 2>/dev/null \
-  | openssl x509 -noout -dates
+sudo systemctl start tailscale-cert-renew.service
+systemctl status tailscale-cert-renew.service --no-pager | head -8
+journalctl -t tailscale-cert-renew --no-pager --since "2 min ago"
 ```
 
-**How it works:** `tailscale cert` requests a fresh certificate from Let's Encrypt via Tailscale's coordination server. The script compares the new cert against the one currently in `/etc/tailscale/certs/` — if they differ, it copies the new files and sends a reload signal to the Nginx container. If the cert hasn't changed (e.g. it was renewed recently), the script exits without touching anything. The `Persistent=true` flag means if the Pi was off when the timer was due, it runs at next boot.
+Expected on a healthy node with a current cert:
 
-**To trigger a manual renewal at any time:**
-
-```bash
-sudo /usr/local/bin/tailscale-cert-renew.sh
-journalctl -t tailscale-cert-renew --no-pager --since "5 min ago"
+```
+file cert unchanged; no reload
+file notAfter=<date>
+:443 served notAfter=<same date>
+:8443 served notAfter=<same date>
 ```
 
-**Monthly check — verify the timer ran and the cert is healthy:**
+All three dates identical means every consumer is current. `status=0/SUCCESS` on the unit.
+
+**How it works:** each week the script calls `tailscale cert`, which self-throttles — it performs a real ACME renewal only once the cert is inside its renewal window and otherwise returns the cached copy instantly, so a weekly cadence carries no rate-limit risk. The script writes into a `mktemp` workdir (cleaned by the `trap`), compares against the file in `/etc/tailscale/certs/`, and only when they differ does it copy the new files and reload the nginx container (`-T` so the reload works without a TTY under systemd, falling back to a container restart if reload fails). Every run logs its outcome plus the live `notAfter` of each port. `Persistent=true` means a missed run fires at next boot.
+
+The `Wrote public cert to <fqdn>.crt` / `Wrote private key to …` lines are `tailscale cert` writing into the temp workdir, not a stray copy into your home directory.
+
+**Verifying over HTTP:** MagicDNS does not resolve a node's own FQDN from that node, so `curl https://<fqdn>/` fails locally with `Could not resolve host`. Use `--resolve` against the Tailscale IP:
 
 ```bash
-# Did the timer fire and what did it log?
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  --resolve <hostname>.<tailnet>.ts.net:8443:$(tailscale ip -4) \
+  https://<hostname>.<tailnet>.ts.net:8443/
+```
+
+The same constraint is why every `openssl s_client` check in this guide connects to `$(tailscale ip -4)` with an explicit `-servername`.
+
+**Monthly health check:**
+
+```bash
 journalctl -t tailscale-cert-renew --no-pager --since "5 weeks ago"
-
-# Is the cert still valid?
-echo | openssl s_client \
-  -connect $(tailscale ip -4):443 \
-  -servername YOUR-PI1-HOSTNAME.your-tailnet.ts.net 2>/dev/null \
-  | openssl x509 -noout -dates
 ```
 
-The first command should show either `cert renewed and nginx reloaded` or `cert unchanged, no reload needed` — both are expected depending on timing. The cert is valid for 90 days; Let's Encrypt only allows renewal inside the 30-day window, so `unchanged` is the normal output for the first two monthly runs after a renewal.
+`file cert unchanged; no reload` is the expected output for most runs — Let's Encrypt only permits renewal inside the 30-day window, so roughly 8 of every 12 weekly runs are legitimate no-ops. What matters is that all `notAfter` lines agree and that the runs are actually happening.
 
 ---
 
@@ -2096,7 +2149,7 @@ With this foundation in place, the Pi can also run:
 
 ---
 
-**Last Updated:** August 2026 (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
+**Last Updated:** September 2026 (cert renewal moved from monthly to weekly on both nodes — the monthly cadence allowed only a single renewal attempt inside Let's Encrypt's 30-day window, and the August 2026 run landed roughly one hour before expiry; Phase 10 script hardened to `set -euo pipefail`, `install`, `docker compose exec -T` with restart fallback, and per-port verification logging of `notAfter` for `:443` and `:8443`; `TimeoutStartSec=120` added to the service so an expired node key surfaces as a failure instead of an indefinite hang; nginx `:8443` `server_name` placeholder replaced with the real FQDN; `--resolve` documented for local curl checks since MagicDNS does not resolve a node's own FQDN. Earlier: August 2026 changes: (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
 
 **Previously:** March 2026 (added split-tunnel mark rule fix — Mullvad's nft output chain drops `0x6d6f6c65`-marked TCP traffic without an explicit accept rule, causing tailscaled to lose coordination server access; watchdog extended to self-heal split-tunnel PID and mark rule; added automated Tailscale certificate renewal via systemd timer)
 **Tested On:** Raspberry Pi 5 (4GB), Raspberry Pi OS Lite Bookworm (64-bit), Mullvad VPN, Tailscale, NextCloud 33.0, Docker, Nginx
