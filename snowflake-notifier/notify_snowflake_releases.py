@@ -374,6 +374,13 @@ def shorten_url(url: str, cache: dict) -> str:
     Note: only shorten public URLs (Snowflake docs, Medium). Tailscale URLs are
     intentionally excluded at the call site.
     """
+    # 2026-09: is.gd and v.gd (same backend) return HTTP 200 with the body
+    # "Error, database insert failed" for every real content URL we submit —
+    # docs.snowflake.com and medium.com both fail consistently, while
+    # example.com succeeds. Shortening is disabled rather than silently
+    # degrading on every item; ntfy renders long URLs as tappable links.
+    return url
+
     if url in cache:
         return cache[url]
     try:
