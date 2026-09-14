@@ -537,7 +537,7 @@ sudo nano /etc/davfs2/secrets
 Add (replace with your actual Nextcloud username and password):
 
 ```
-https://YOUR_PI1_TAILSCALE_IP/remote.php/dav/files/YOUR_NC_USERNAME/ YOUR_NC_USERNAME YOUR_NC_PASSWORD
+https://YOUR_PI1_TAILSCALE_HOSTNAME/remote.php/dav/files/YOUR_NC_USERNAME/ YOUR_NC_USERNAME YOUR_NC_PASSWORD
 ```
 
 ```bash
@@ -553,7 +553,7 @@ sudo nano /etc/fstab
 Add at the bottom:
 
 ```
-https://YOUR_PI1_TAILSCALE_IP/remote.php/dav/files/YOUR_NC_USERNAME/ /mnt/nextcloud davfs _netdev,auto,uid=1000,gid=1000,ro 0 0
+https://YOUR_PI1_TAILSCALE_HOSTNAME/remote.php/dav/files/YOUR_NC_USERNAME/ /mnt/nextcloud davfs _netdev,auto,uid=1000,gid=1000,ro 0 0
 ```
 
 **Key options:**
@@ -565,40 +565,63 @@ https://YOUR_PI1_TAILSCALE_IP/remote.php/dav/files/YOUR_NC_USERNAME/ /mnt/nextcl
 | `ro` | Read-only — Pi 2 reads documents, never writes |
 | `uid=1000,gid=1000` | Mount as your Pi user, not root |
 
-### 7.5 Trust the Nextcloud TLS Certificate
+**Use Pi 1's MagicDNS hostname, not its Tailscale IP.** Pi 1's certificate is issued for its FQDN, so an IP-based URL fails verification with *"certificate issued for a different hostname"* and the mount is refused. MagicDNS resolves the peer's name from this node (only a node's *own* name fails to resolve locally), so the FQDN works and the certificate validates against the normal public chain — no pinning, no manual upkeep.
 
-The fstab entry uses Pi 1's Tailscale IP, but the TLS certificate is issued for its hostname (`vpi5.your-tailnet.ts.net`). Without pinning the cert, davfs2 prompts interactively on every mount — which blocks auto-mount on boot.
+### 7.5 TLS Certificate — Do Not Pin It
 
-Pin the certificate so davfs2 trusts it silently:
+With the FQDN in `/etc/fstab`, there is nothing to configure here. Pi 1's certificate is a publicly-trusted Let's Encrypt cert issued for that exact name, so davfs2 validates it against the system CA bundle like any other HTTPS client.
 
-```bash
-sudo mkdir -p /etc/davfs2/certs
-echo | openssl s_client -connect YOUR_PI1_TAILSCALE_IP:443 \
-  -servername YOUR_PI1_TAILSCALE_HOSTNAME 2>/dev/null | \
-  openssl x509 > /tmp/nextcloud.pem
-sudo mv /tmp/nextcloud.pem /etc/davfs2/certs/nextcloud.pem
-```
-
-Tell davfs2 to use it:
+Confirm before mounting:
 
 ```bash
-sudo nano /etc/davfs2/davfs2.conf
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://YOUR_PI1_TAILSCALE_HOSTNAME/remote.php/dav/files/YOUR_NC_USERNAME/
 ```
 
-Add at the bottom:
+`401` is the expected answer — the endpoint is reachable and its certificate validated; it is simply asking for credentials. A TLS error instead means the FQDN is wrong or Pi 1's certificate has lapsed.
 
-```
-trust_server_cert /etc/davfs2/certs/nextcloud.pem
-```
+> **Why not pin the certificate.** An earlier version of this guide used Pi 1's Tailscale **IP** in `fstab`, which fails verification because the certificate carries a hostname, and worked around it with `trust_server_cert /etc/davfs2/certs/<name>.pem`. That pins one specific certificate file — so the mount breaks silently the next time the certificate is reissued, every 90 days, and the fix is a manual re-export that nothing tracks or reminds you about.
+>
+> It duly broke: the certificate was reissued on 31 August 2026 and the mount failed at the next reboot with *"the server certificate is not trusted… certificate issued for a different hostname, issuer is not trusted"*. The sync had been skipping for two weeks by then (see 7.7) with no error anywhere. Using the FQDN removes the pin, the 90-day chore, and the failure mode together.
+>
+> If you have an existing install with a pin, comment it out and switch `fstab` to the FQDN:
+>
+> ```bash
+> sudo sed -i 's|^trust_server_cert|#trust_server_cert|' /etc/davfs2/davfs2.conf
+> sudo systemctl daemon-reload
+> sudo mount /mnt/nextcloud
+> ```
 
-**Note:** When the Tailscale certificate renews (every 90 days, handled by the timer on Pi 1), you'll need to re-export this cert. The `warning: the server does not support locks` message is normal for Nextcloud WebDAV and can be ignored.
+The `warning: the server does not support locks` message is normal for Nextcloud WebDAV and can be ignored.
 
 ### 7.6 Mount and Verify
 
 ```bash
 sudo mount /mnt/nextcloud
+mount | grep dav
 ls /mnt/nextcloud
 # Should list your Nextcloud files and folders
+```
+
+**Check the mount after every reboot**, and after any Pi 1 maintenance. `_netdev` waits for the network, not for Tailscale, and certainly not for Pi 1's nginx to be serving — so a mount attempt can fail simply because Pi 1 was still coming up:
+
+```bash
+systemctl status mnt-nextcloud.mount --no-pager | head -6
+journalctl -u mnt-nextcloud.mount -b --no-pager
+```
+
+A failed mount leaves `/mnt/nextcloud` as an ordinary empty directory. The sync script (7.7) detects that and skips rather than treating it as "all documents deleted" — the right behaviour, but it means the failure is **silent**: the unit exits 0, no `OnFailure=` handler fires, and the knowledge base quietly goes stale. `journalctl -u nc-knowledge-sync` is the only place it shows:
+
+```
+WARNING: /mnt/nextcloud/Documents/openwebui is empty or not mounted — skipping sync
+```
+
+If the mount is down, fix it and re-run the sync manually rather than waiting for the timer:
+
+```bash
+sudo mount /mnt/nextcloud
+sudo systemctl start nc-knowledge-sync.service
+journalctl -u nc-knowledge-sync --no-pager --since "3 min ago"
 ```
 
 ### 7.7 Sync Documents to Open WebUI Knowledge Base
@@ -869,6 +892,13 @@ fi
 
 # Verify both consumers; warn if the running Funnel lags the file cert.
 TS_IP=$(tailscale ip -4)
+# An empty TS_IP makes the connect string ":443", which openssl resolves to
+# loopback - reporting "unreachable" while the real cause is that tailscaled
+# was not ready. Seen after the 2026-09 tailscale upgrade restarted the daemon.
+if [ -z "$TS_IP" ]; then
+    log "ERROR: tailscale ip -4 returned nothing - cannot verify served certs"
+    exit 1
+fi
 file_end=$(openssl x509 -enddate -noout -in "$CRT" | cut -d= -f2)
 fun_end=$(echo | openssl s_client -connect "${TS_IP}:${FUNNEL_PORT}" \
           -servername "$HOSTNAME" 2>/dev/null \
@@ -1292,5 +1322,12 @@ Run only one large model at a time on 16GB RAM. Ollama unloads models from memor
 
 ---
 
-**Last Updated:** September 2026 (added a daily cross-node watchdog — each node checks the other's tailnet presence, node key expiry and `:443` certificate expiry, closing the gap `OnFailure=` cannot cover: a unit that never runs at all. Liveness is taken from the TLS handshake rather than `tailscale ping`, which returns `no matching peer` for a full MagicDNS FQDN and produced a false UNREACHABLE alongside a successful handshake with the same peer. Earlier: September 2026 (added ntfy failure alerting via a shared `OnFailure=` handler, wired to `tailscale-cert-renew` and `snowflake-notifier`; `TimeoutStartSec=120` added to the cert renewal service so an expired node key surfaces as a failure rather than an indefinite hang. Earlier: June 2026 (hardened Tailscale cert renewal after a June lapse: `set -e` + `mktemp`/`trap`, weekly cadence replacing monthly, `-T` nginx reload with restart fallback, copy-on-change, and per-run verification of both cert consumers — Open WebUI's `:443` file cert and the SQL-fixer Funnel's `:8443` tailscaled-managed cert)
-**Tested On:** Raspberry Pi 5 (16GB), Raspberry Pi OS Lite Bookworm (64-bit), Ollama, Open WebUI, Docker, Nginx
+**Last Updated:** September 2026 — maintenance, alerting and monitoring pass.
+
+*Certificates and alerting.* Renewal moved to a weekly cadence with a hardened script, and a shared `OnFailure=` handler now pushes unit failures to a phone with the last 15 journal lines attached, wired to `tailscale-cert-renew` and `snowflake-notifier`. A daily cross-node watchdog closes the gap `OnFailure=` cannot cover — a unit that never runs at all — by having each node check the other's tailnet presence, node key expiry and `:443` certificate expiry; liveness is taken from the TLS handshake rather than `tailscale ping`, which returns `no matching peer` for a full MagicDNS FQDN. `TimeoutStartSec=120` added to the cert service, plus a guard against an empty `tailscale ip -4`, which otherwise leaves the connect string as `:443`, resolves to loopback, and reports `unreachable` while blaming nginx for a tailscaled that was not ready.
+
+*WebDAV.* Phase 7 no longer pins Pi 1's TLS certificate. The old approach used Pi 1's Tailscale **IP** in `fstab`, which fails certificate verification, and worked around it with `trust_server_cert` — pinning one certificate file, so the mount broke silently at every 90-day reissue and needed a manual re-export nothing tracked. It duly broke on the 31 August reissue and surfaced only two weeks later. Using Pi 1's MagicDNS FQDN validates against the public chain and removes the pin, the chore and the failure mode together. Phase 7.6 now documents checking the mount after reboots, and why a failed mount is silent: the sync correctly skips an empty mount rather than deleting the knowledge base, but exits 0 doing so.
+
+*Documentation.* OS corrected from Bookworm to Trixie (Debian 13); tested versions now recorded explicitly.
+
+**Tested On:** Raspberry Pi 5 (16GB), Raspberry Pi OS Lite Trixie (Debian 13, 64-bit), kernel 6.18.39, Tailscale 1.102.4, Ollama 0.34.0, Open WebUI v0.11.3, Docker 29.8, Nginx, davfs2 1.7.1

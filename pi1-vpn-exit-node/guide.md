@@ -63,7 +63,7 @@ On your Mac/PC:
 1. Download **Raspberry Pi Imager**: https://www.raspberrypi.com/software/
 2. Insert microSD card
 3. In Imager:
-   - **OS**: Raspberry Pi OS Lite (64-bit) — Bookworm
+   - **OS**: Raspberry Pi OS Lite (64-bit) — Trixie (Debian 13)
    - **Storage**: Your microSD card
    - **Settings** (gear icon):
      - Hostname: `vpi5`
@@ -369,7 +369,7 @@ bantime = 3600
 findtime = 600
 ```
 
-**Note:** No `logpath` is needed — Bookworm uses journald by default, and fail2ban detects this automatically. Adding `logpath = /var/log/auth.log` would break on systems where rsyslog isn't installed.
+**Note:** No `logpath` is needed — Trixie uses journald by default, and fail2ban detects this automatically. Adding `logpath = /var/log/auth.log` would break on systems where rsyslog isn't installed.
 
 **⚠️ If you previously copied `jail.conf` to `jail.local`:** Check for duplicate `[sshd]` sections, which crash fail2ban with `section 'sshd' already exists`. Either delete `jail.local` entirely (the defaults plus your `jail.d/sshd.conf` override are sufficient), or ensure only one `[sshd]` section exists in the file:
 
@@ -1668,27 +1668,96 @@ sudo reboot
 sudo systemctl status exit-node-routes.service --no-pager
 ```
 
-**Updating NextCloud and Docker containers:**
+**Updating Nextcloud and Docker containers:**
+
+`apt full-upgrade` does not touch Nextcloud — it only updates OS packages. Container images are a separate upgrade path, and Nextcloud is the one service here where a careless pull can leave you with a database you cannot migrate. Work through this in order.
+
+**Step 1 — check the version gap before pulling anything.**
+
+Nextcloud does **not** support skipping major versions. The compose file tracks `nextcloud:latest`, so a pull can move you more than one major at a time — `occ upgrade` will then refuse and the container will not serve.
+
+```bash
+# Currently running
+docker exec -u www-data nextcloud-nextcloud-1 php occ status
+
+# What :latest would give you (pulling the image alone changes nothing
+# until `docker compose up -d`, so this is safe)
+docker compose -f ~/nextcloud/docker-compose.yml pull nextcloud
+docker image inspect nextcloud:latest --format '{{json .Config.Env}}' | tr ',' '\n' | grep -i nextcloud_version
+```
+
+If the gap is more than one major, pin the intermediate version in `docker-compose.yml` (e.g. `image: nextcloud:35`), complete that upgrade, then move on. Do not jump.
+
+**Step 2 — back up the database and config.**
+
+```bash
+docker exec nextcloud-db-1 sh -c 'exec mariadb-dump -u nextcloud -p"$MYSQL_PASSWORD" --single-transaction nextcloud' \
+  > ~/nextcloud-db-$(date +%F).sql
+
+docker cp nextcloud-nextcloud-1:/var/www/html/config/config.php ~/nextcloud-config-$(date +%F).php
+
+ls -lh ~/nextcloud-db-*.sql
+tail -2 ~/nextcloud-db-*.sql     # must end with "-- Dump completed"
+```
+
+Running `mariadb-dump` **inside** the container means the password comes from the container's own environment and never enters your shell history.
+
+> **Known issue — the root credential does not work.** `mariadb-dump -u root` fails with `Access denied` even though `MYSQL_ROOT_PASSWORD` is present in the container environment and matches `docker-compose.yml`. `MYSQL_ROOT_PASSWORD` is only read when the data volume is **first initialised**; changing it in compose afterwards has no effect, and this volume was created with a different value. The `nextcloud` user works and covers the only database that matters, so backups are fine — but there is currently no administrative access to this MariaDB instance, which would matter for repairs or a full restore. Fixing it means resetting the root password inside the running container.
+
+A truncated dump you believe in is worse than no dump. Check the terminator every time.
+
+**Step 3 — pull and recreate.**
 
 ```bash
 cd ~/nextcloud
-
-# Pull latest images
 docker compose pull
-
-# Recreate containers with new images
 docker compose up -d
-
-# Clean up old images
-docker image prune -f
+docker compose ps
 ```
 
-After a NextCloud update (i.e. after `docker compose pull` — not after `apt full-upgrade`,
-which only updates OS packages and does not touch Nextcloud), check for required database migrations:
+**Step 4 — run the migrations, and turn maintenance mode back off.**
 
 ```bash
 docker exec -u www-data nextcloud-nextcloud-1 php occ upgrade
+docker exec -u www-data nextcloud-nextcloud-1 php occ maintenance:mode --off
 docker exec -u www-data nextcloud-nextcloud-1 php occ db:add-missing-indices
+docker exec -u www-data nextcloud-nextcloud-1 php occ status
+```
+
+> **`occ upgrade` leaves maintenance mode ON.** It ends with `Maintenance mode is kept active`, and every subsequent `occ` command then refuses with *"Nextcloud is in maintenance mode, only AppAPI commands are loaded"* — including `db:add-missing-indices`, which silently does nothing. The `--off` line is not optional, and `occ status` must show `maintenance: false` before you move on.
+
+**Step 5 — verify before pruning.**
+
+All four containers restart, so this checks nginx, ntfy and the certificate path as well as Nextcloud itself:
+
+```bash
+# Nextcloud and ntfy over the tailnet (see the -4 note in Phase 10)
+curl -4 -sS -o /dev/null -w '%{http_code}\n' --max-time 10 \
+  --resolve <hostname>.<tailnet>.ts.net:443:$(tailscale ip -4) \
+  https://<hostname>.<tailnet>.ts.net/          # expect 302
+
+curl -4 -sS -o /dev/null -w '%{http_code}\n' --max-time 10 \
+  --resolve <hostname>.<tailnet>.ts.net:8443:$(tailscale ip -4) \
+  https://<hostname>.<tailnet>.ts.net:8443/      # expect 200
+
+# Certificate still served correctly on both ports
+sudo systemctl start tailscale-cert-renew.service
+journalctl -t tailscale-cert-renew --no-pager -n 4
+
+# Alert path — ntfy sits behind this nginx
+sudo bash -c 'source /etc/ntfy-alert.env; curl -sS -o /dev/null -w "%{http_code}\n" \
+  ${NTFY_CURL_OPTS} -H "Authorization: Bearer $NTFY_TOKEN" \
+  -d "post-upgrade check" "$NTFY_ALERT_URL"'
+```
+
+Then log in through a browser. A `302` only proves the redirect fires; only a real session proves the app works.
+
+**Step 6 — reclaim disk.**
+
+Only once everything above passes. The old images are your rollback.
+
+```bash
+docker image prune -f
 ```
 
 ### Temperature Monitoring
@@ -1792,17 +1861,51 @@ The certificates will be stored in `/etc/tailscale/certs/`.
 nano ~/nextcloud/nginx/nextcloud.conf
 ```
 
-Paste (replace `vpi5.your-tailnet.ts.net` with your actual Tailscale hostname):
+This single container terminates TLS for **every** service on this node — Nextcloud and ntfy, on two ports. One certificate, one reload, three routes:
+
+| URL | Backend | Used by |
+|---|---|---|
+| `https://<fqdn>/` | `nextcloud:80` | Browser, desktop and mobile clients |
+| `https://<fqdn>/ntfy/<topic>` | `ntfy:80` | Scripts publishing notifications |
+| `https://<fqdn>:8443/<topic>` | `ntfy:80` | The ntfy mobile app |
+
+ntfy is reachable two ways on purpose. The `/ntfy/` prefix keeps everything on `:443`, which is what publishing scripts use; the mobile app is happier with a server at the root of its own port, which is what `NTFY_BASE_URL` points at.
+
+Paste (replace `<hostname>.<tailnet>.ts.net` with your actual Tailscale FQDN):
 
 ```nginx
 server {
     listen 443 ssl;
-    server_name vpi5.your-tailnet.ts.net 100.x.x.x;
+    server_name <hostname>.<tailnet>.ts.net;
 
-    ssl_certificate /etc/tailscale/certs/vpi5.your-tailnet.ts.net.crt;
-    ssl_certificate_key /etc/tailscale/certs/vpi5.your-tailnet.ts.net.key;
+    ssl_certificate     /etc/tailscale/certs/<hostname>.<tailnet>.ts.net.crt;
+    ssl_certificate_key /etc/tailscale/certs/<hostname>.<tailnet>.ts.net.key;
 
+    # Nextcloud uploads. Without this, nginx falls back to its 1 MB default
+    # and every upload over 1 MB fails with 413 — from the browser this looks
+    # like the file silently refusing to attach.
     client_max_body_size 10G;
+
+    # ntfy — proxy /ntfy/* to the ntfy container, stripping the /ntfy prefix
+    # (the trailing slash on proxy_pass is what strips it).
+    location /ntfy/ {
+        proxy_pass http://ntfy:80/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Required for ntfy SSE / long-polling
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 24h;
+        proxy_send_timeout 24h;
+
+        client_max_body_size 0;
+    }
 
     location / {
         proxy_pass http://nextcloud:80;
@@ -1812,7 +1915,45 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
+
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name <hostname>.<tailnet>.ts.net;
+
+    # Same Tailscale cert — one certificate covers every port on the FQDN.
+    ssl_certificate     /etc/tailscale/certs/<hostname>.<tailnet>.ts.net.crt;
+    ssl_certificate_key /etc/tailscale/certs/<hostname>.<tailnet>.ts.net.key;
+
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://ntfy:80/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE / long-poll support
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 24h;
+        proxy_send_timeout 24h;
+    }
+}
 ```
+
+> **Fill in both `server_name` values.** With only one server block per port, nginx treats it as the default for that port and serves it regardless of the name sent — so a leftover placeholder works fine and stays invisible until the day a second vhost is added on the same port and silently steals the traffic. Validate and reload after any edit:
+>
+> ```bash
+> docker compose -f ~/nextcloud/docker-compose.yml exec -T nginx nginx -t \
+>   && docker compose -f ~/nextcloud/docker-compose.yml exec -T nginx nginx -s reload
+> ```
+>
+> `-T` matters: without it, `docker compose exec` fails for want of a TTY when called from a script or a systemd unit, which is how the certificate renewal reloads this container.
 
 **Key settings:**
 
@@ -1874,6 +2015,8 @@ volumes:
   db:
   nextcloud:
 ```
+
+> **On `nextcloud:latest`.** This tracks the newest release, which is convenient for a fresh install but becomes a trap at upgrade time: Nextcloud does **not** support skipping major versions, and if you leave the instance alone long enough for `:latest` to move two majors ahead, `docker compose pull && up -d` gives you a container that refuses to migrate and will not serve. Before every `docker compose pull`, compare the running version against what `:latest` would install — the step-by-step procedure is under **Maintenance → Updating Nextcloud and Docker containers**. If you would rather remove the risk than remember the check, pin the major instead (`image: nextcloud:34`) and bump it deliberately once a year; `mariadb:11` above is already pinned that way.
 
 **⚠️ CRITICAL:** The `MYSQL_PASSWORD` must be identical in both the `db` and `nextcloud` services.
 
@@ -2028,6 +2171,13 @@ fi
 
 # Verify every consumer against the on-disk cert; warn on any that lags.
 TS_IP=$(tailscale ip -4)
+# An empty TS_IP makes the connect string ":443", which openssl resolves to
+# loopback - reporting "unreachable" while the real cause is that tailscaled
+# was not ready. Seen after the 2026-09 tailscale upgrade restarted the daemon.
+if [ -z "$TS_IP" ]; then
+    log "ERROR: tailscale ip -4 returned nothing - cannot verify served certs"
+    exit 1
+fi
 file_end=$(openssl x509 -enddate -noout -in "$CRT" | cut -d= -f2)
 log "file notAfter=${file_end}"
 
@@ -2127,12 +2277,14 @@ The `Wrote public cert to <fqdn>.crt` / `Wrote private key to …` lines are `ta
 **Verifying over HTTP:** MagicDNS does not resolve a node's own FQDN from that node, so `curl https://<fqdn>/` fails locally with `Could not resolve host`. Use `--resolve` against the Tailscale IP:
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' \
+curl -4 -sS -o /dev/null -w '%{http_code}\n' \
   --resolve <hostname>.<tailnet>.ts.net:8443:$(tailscale ip -4) \
   https://<hostname>.<tailnet>.ts.net:8443/
 ```
 
 The same constraint is why every `openssl s_client` check in this guide connects to `$(tailscale ip -4)` with an explicit `-servername`.
+
+**Use `-4`.** `--resolve` pins the name to an IPv4 address but does not stop curl from also attempting IPv6, and this node has an IPv6 address that nothing answers on — each attempt costs a 3-second timeout before curl gives up, which looks exactly like the service being down. The same ambiguity affects `openssl s_client`: an empty or unset `TS_IP` leaves the connect string as `:443`, which resolves to loopback rather than failing, so the script reports `unreachable` and points the blame at nginx. The guard added to the Phase 10 script above exists for that reason.
 
 **Monthly health check:**
 
@@ -2240,7 +2392,17 @@ With this foundation in place, the Pi can also run:
 
 ---
 
-**Last Updated:** September 2026 (added a daily cross-node watchdog — each node checks the other's tailnet presence, node key expiry and `:443` certificate expiry, closing the gap `OnFailure=` cannot cover: a unit that never runs at all. Liveness is taken from the TLS handshake rather than `tailscale ping`, which returns `no matching peer` for a full MagicDNS FQDN and produced a false UNREACHABLE alongside a successful handshake with the same peer. Earlier: September 2026 (added ntfy failure alerting — a shared `OnFailure=` handler pushes unit failures to a phone with the last 15 journal lines attached, wired to `tailscale-cert-renew` and `exit-node-routes`, using a loopback URL so the alert path survives a broken certificate; `TimeoutStartSec=240` added to `exit-node-routes.service` so a blocked `tailscale up` fails visibly instead of hanging in `activating` forever, which also lets `OnFailure=` fire. Earlier: September 2026 (cert renewal moved from monthly to weekly on both nodes — the monthly cadence allowed only a single renewal attempt inside Let's Encrypt's 30-day window, and the August 2026 run landed roughly one hour before expiry; Phase 10 script hardened to `set -euo pipefail`, `install`, `docker compose exec -T` with restart fallback, and per-port verification logging of `notAfter` for `:443` and `:8443`; `TimeoutStartSec=120` added to the service so an expired node key surfaces as a failure instead of an indefinite hang; nginx `:8443` `server_name` placeholder replaced with the real FQDN; `--resolve` documented for local curl checks since MagicDNS does not resolve a node's own FQDN. Earlier: August 2026 changes: (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check — applies to the cert renewal script too)
+**Last Updated:** September 2026 — maintenance, alerting and monitoring pass.
+
+*Certificates.* Renewal moved from monthly to weekly on both nodes: the monthly cadence allowed only one attempt inside Let's Encrypt's 30-day window, and the August 2026 run landed roughly an hour before expiry. The Phase 10 script was hardened (`set -euo pipefail`, `install`, `docker compose exec -T` with a restart fallback, per-port `notAfter` logging for `:443` and `:8443`), and gained a guard against an empty `tailscale ip -4` — an unset `TS_IP` leaves the connect string as `:443`, which resolves to loopback and reports `unreachable`, blaming nginx for a tailscaled that was not ready. `-4` added to local curl checks for the same class of reason. The nginx `:8443` `server_name` placeholder was replaced with the real FQDN.
+
+*Alerting.* A shared `OnFailure=` handler now pushes unit failures to a phone with the last 15 journal lines attached, wired to `tailscale-cert-renew` and `exit-node-routes`, posting over loopback so the alert survives the certificate being the broken thing. A daily cross-node watchdog closes the gap `OnFailure=` cannot cover — a unit that never runs at all — by having each node check the other's tailnet presence, node key expiry and `:443` certificate expiry. Liveness is taken from the TLS handshake rather than `tailscale ping`, which returns `no matching peer` for a full MagicDNS FQDN and produced a false `UNREACHABLE` in the same run that successfully read that peer's certificate.
+
+*Timeouts.* `TimeoutStartSec=120` on the cert service and `240` on `exit-node-routes` (whose two `ExecStartPre` loops already budget 90s), so a blocked `tailscale up` fails visibly instead of hanging in `activating` forever — which is also what lets `OnFailure=` fire at all.
+
+*Documentation.* OS corrected from Bookworm to Trixie (Debian 13). Section 9.4 now documents the **complete** nginx config: the `:8443` ntfy vhost and the `/ntfy/` location on `:443` had never been written down, even though the notifier and the whole alerting path depend on them — which is also how a `YOUR_PI1_TAILSCALE_HOSTNAME` placeholder survived in the live config for months, since a lone server block is the default for its port and serves regardless of name. A note on `nextcloud:latest` was added at the compose listing rather than only in Maintenance. The Nextcloud upgrade procedure was rewritten after a live run exposed three gaps: no database backup step, `occ upgrade` leaving maintenance mode active so `db:add-missing-indices` silently refuses, and the documented `mariadb-dump -u root` failing because `MYSQL_ROOT_PASSWORD` is only honoured at volume initialisation. A major-version-skip warning and a post-upgrade verification block were added.
+
+**Previously:** August 2026 (added stale-kernel detection — after the Phase 2.4 `dd` clone both SD and NVMe carry a bootable /boot/firmware with identical PARTUUIDs, and an `rpi-eeprom-update -a` can reset BOOT_ORDER so the firmware boots the SD kernel against the NVMe rootfs, silently discarding every kernel upgrade; Phase 2.7 now verifies boot device and de-duplicates PARTUUIDs, Maintenance verifies the running kernel after every upgrade and after EEPROM flashes, new Troubleshooting entry added. Earlier: fixed exit node breakage after `tailscale` package upgrades — a `tailscaled` restart recreates `tailscale0`, destroying the device-bound `100.64.0.0/10` return route and resetting per-interface `rp_filter`, while name-matched iptables rules survive and mask the fault; watchdog extended to restore both, `nft`/`ip` stderr now logged to the journal instead of discarded, `net.ipv4.conf.default.rp_filter = 0` added to Phase 6.1, post-upgrade verification block added to Maintenance; all `logger` calls now use `-t` and all verification steps use `journalctl -t` instead of `-u`, since `logger` output is attributed to the syslog identifier rather than the unit and was therefore invisible in every documented check)
 
 **Previously:** March 2026 (added split-tunnel mark rule fix — Mullvad's nft output chain drops `0x6d6f6c65`-marked TCP traffic without an explicit accept rule, causing tailscaled to lose coordination server access; watchdog extended to self-heal split-tunnel PID and mark rule; added automated Tailscale certificate renewal via systemd timer)
-**Tested On:** Raspberry Pi 5 (4GB), Raspberry Pi OS Lite Bookworm (64-bit), Mullvad VPN, Tailscale, NextCloud 33.0, Docker, Nginx
+**Tested On:** Raspberry Pi 5 (4GB), Raspberry Pi OS Lite Trixie (Debian 13, 64-bit), kernel 6.18.39, Mullvad VPN 2026.4, Tailscale 1.102.4, Nextcloud 34.0.4, MariaDB 11, Docker 29.8, Nginx
