@@ -814,7 +814,7 @@ KEYWORDS_FILE   = os.environ.get("KEYWORDS_FILE", "/etc/snowflake-notifier/keywo
 SOURCES_FILE    = os.environ.get("SOURCES_FILE", "/etc/snowflake-notifier/sources.json")
 STATE_DIR       = Path(os.environ.get("STATE_DIR",
                    str(Path.home() / ".local/share/snowflake-notifier")))
-DIGEST_DIR      = os.environ.get("DIGEST_DIR", "/home/vincepi/openwebui/digest")
+DIGEST_DIR      = os.environ.get("DIGEST_DIR", "/home/YOUR_PI2_USERNAME/openwebui/digest")
 DIGEST_BASE_URL = os.environ["DIGEST_BASE_URL"]
 TEMPLATE_DIR    = "/etc/snowflake-notifier/templates"
 
@@ -1530,7 +1530,7 @@ Expected log shape with v1.3:
 2026-05-30 08:00:09 INFO    After dedupe filter: 8 / 44 items
 2026-05-30 08:00:09 INFO    After score-zero drop: 3 / 8 items
 2026-05-30 08:00:35 INFO    ntfy POST succeeded (attempt 1)
-2026-05-30 08:00:35 INFO    Digest page written: /home/vincepi/openwebui/digest/2026-05-30.html
+2026-05-30 08:00:35 INFO    Digest page written: /home/YOUR_PI2_USERNAME/openwebui/digest/2026-05-30.html
 2026-05-30 08:00:35 INFO    === run complete: success | 30.4s ===
 ```
 

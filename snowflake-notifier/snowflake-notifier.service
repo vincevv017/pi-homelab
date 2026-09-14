@@ -6,8 +6,8 @@ Wants=network-online.target ollama.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/snowflake-notifier-run.sh
-User=vincepi
+User=YOUR_PI2_USERNAME
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=300
-EnvironmentFile=-/home/vincepi/.config/snowflake-notifier/env
+EnvironmentFile=-/home/YOUR_PI2_USERNAME/.config/snowflake-notifier/env

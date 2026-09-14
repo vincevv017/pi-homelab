@@ -656,7 +656,7 @@ if __name__ == "__main__":
 sudo chmod 755 /usr/local/bin/refresh_egress_allowlist.py
 ```
 
-> The script writes `/etc/nginx/...` and reloads nginx, so it runs as root via the systemd unit below. The venv shebang (`/opt/sql-fixer/.venv/bin/python3`) means no PATH assumptions. If you'd rather not run as root, move the nginx-touching calls behind a narrow `sudoers` entry for `nginx -t` / `nginx -s reload` and run the unit as `vincepi`.
+> The script writes `/etc/nginx/...` and reloads nginx, so it runs as root via the systemd unit below. The venv shebang (`/opt/sql-fixer/.venv/bin/python3`) means no PATH assumptions. If you'd rather not run as root, move the nginx-touching calls behind a narrow `sudoers` entry for `nginx -t` / `nginx -s reload` and run the unit as an unprivileged user.
 
 ### D.4 — First manual run
 
