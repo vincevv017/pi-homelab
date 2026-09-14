@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cross-node homelab watchdog
+
+[Timer]
+OnCalendar=*-*-* 07:15:00
+Persistent=true
+RandomizedDelaySec=20min
+
+[Install]
+WantedBy=timers.target

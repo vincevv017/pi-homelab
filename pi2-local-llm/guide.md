@@ -1028,6 +1028,27 @@ Each should print `OnFailure=ntfy-alert@<unit>.service` with a **single** `.serv
 
 **What this does not catch:** a unit that never runs at all. A disabled timer or a powered-off node produces no failure and therefore no alert.
 
+
+### Cross-node watchdog
+
+`OnFailure=` cannot see a unit that never runs — a disabled timer, or a node that is off. Nothing fails, so nothing alerts. A daily watchdog on **Pi 1** checks this node's tailnet presence, node key expiry and `:443` certificate expiry, warning below 21 days; this node does the same for Pi 1 in return.
+
+Setup, the `tailscale ping` FQDN gotcha, and the alert-path test are in [`../ntfy-alerting/README.md`](../ntfy-alerting/README.md).
+
+```bash
+sudo install -m 755 ntfy-alerting/homelab-watchdog.sh /usr/local/bin/homelab-watchdog.sh
+sudo install -m 644 ntfy-alerting/homelab-watchdog.service /etc/systemd/system/
+sudo install -m 644 ntfy-alerting/homelab-watchdog.timer /etc/systemd/system/
+sudo install -m 600 ntfy-alerting/homelab-watchdog.env.example /etc/homelab-watchdog.env
+sudo nano /etc/homelab-watchdog.env     # PEER_FQDN = the Pi 1 FQDN
+sudo systemctl daemon-reload
+sudo systemctl start homelab-watchdog.service      # dry run first
+journalctl -t homelab-watchdog --no-pager --since "2 min ago"
+sudo systemctl enable --now homelab-watchdog.timer
+```
+
+A healthy run logs peer presence, key expiry, cert days remaining, a ping diagnostic, and `all checks OK` — and pushes nothing.
+
 ---
 
 ## Architecture
@@ -1271,5 +1292,5 @@ Run only one large model at a time on 16GB RAM. Ollama unloads models from memor
 
 ---
 
-**Last Updated:** September 2026 (added ntfy failure alerting via a shared `OnFailure=` handler, wired to `tailscale-cert-renew` and `snowflake-notifier`; `TimeoutStartSec=120` added to the cert renewal service so an expired node key surfaces as a failure rather than an indefinite hang. Earlier: June 2026 (hardened Tailscale cert renewal after a June lapse: `set -e` + `mktemp`/`trap`, weekly cadence replacing monthly, `-T` nginx reload with restart fallback, copy-on-change, and per-run verification of both cert consumers — Open WebUI's `:443` file cert and the SQL-fixer Funnel's `:8443` tailscaled-managed cert)
+**Last Updated:** September 2026 (added a daily cross-node watchdog — each node checks the other's tailnet presence, node key expiry and `:443` certificate expiry, closing the gap `OnFailure=` cannot cover: a unit that never runs at all. Liveness is taken from the TLS handshake rather than `tailscale ping`, which returns `no matching peer` for a full MagicDNS FQDN and produced a false UNREACHABLE alongside a successful handshake with the same peer. Earlier: September 2026 (added ntfy failure alerting via a shared `OnFailure=` handler, wired to `tailscale-cert-renew` and `snowflake-notifier`; `TimeoutStartSec=120` added to the cert renewal service so an expired node key surfaces as a failure rather than an indefinite hang. Earlier: June 2026 (hardened Tailscale cert renewal after a June lapse: `set -e` + `mktemp`/`trap`, weekly cadence replacing monthly, `-T` nginx reload with restart fallback, copy-on-change, and per-run verification of both cert consumers — Open WebUI's `:443` file cert and the SQL-fixer Funnel's `:8443` tailscaled-managed cert)
 **Tested On:** Raspberry Pi 5 (16GB), Raspberry Pi OS Lite Bookworm (64-bit), Ollama, Open WebUI, Docker, Nginx

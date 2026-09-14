@@ -130,3 +130,69 @@ sudo rm /etc/systemd/system/alert-test.service && sudo systemctl daemon-reload
 **`tail -c 2500` on the journal excerpt.** ntfy enforces a 4096-byte message body limit; the title, result line and headers consume the rest.
 
 **iOS delivery.** Self-hosted ntfy cannot use Apple's push service directly. `NTFY_UPSTREAM_BASE_URL: "https://ntfy.sh"` forwards a wake-up poll so the app fetches the real message from the local server. The bridge is per-topic and only engages once the client is subscribed, so messages published before subscribing may never appear.
+
+---
+
+## Cross-Node Watchdog
+
+`OnFailure=` only fires when a unit *runs and fails*. It cannot see a unit that never runs: a disabled timer, a crashed scheduler, a node that is simply off. Nothing fails, so nothing alerts. The September 2026 node-key expiry on Pi 2 was exactly this shape — eleven days from taking out the Funnel, Open WebUI, the notifier's ntfy path and `tailscale cert` itself, with no failing unit anywhere.
+
+Each node checks the **other** daily and warns below `WARN_DAYS` (default 21).
+
+| Check | Source | Verdict |
+|---|---|---|
+| Peer present in the tailnet | `tailscale status --json` | Problem if absent |
+| Node key expiry | Peer's `KeyExpiry` | Problem below threshold |
+| HTTPS cert expiry | TLS handshake on peer `:443` | Problem below threshold |
+| Round-trip time | `tailscale ping <ip>` | Diagnostic only, never a verdict |
+
+### Liveness comes from the TLS handshake, not from ping
+
+The first version used `tailscale ping "$PEER_FQDN"` for reachability. It returns `no matching peer` and exits 1 for a **full MagicDNS FQDN**, while accepting the short hostname or the tailnet IP:
+
+```
+$ tailscale ping <peer>.<tailnet>.ts.net   →  no matching peer   (exit 1)
+$ tailscale ping <peer>                    →  pong ... in 1ms    (exit 0)
+$ tailscale ping 100.x.y.z                 →  pong ... in 1ms    (exit 0)
+```
+
+On one node this produced `UNREACHABLE` in the same run that went on to complete a TLS handshake with that peer and read its certificate — two contradictory results, and a false-positive alert on day one. A monitoring check that cries wolf trains you to ignore the topic, which is worse than having no check.
+
+The fix was structural rather than a tuning change. The script already resolves the peer's tailnet IP and opens `:443`; a completed handshake is **stronger** evidence of liveness than a disco ping, and costs no extra round trip. Ping survives only as a logged diagnostic that cannot contribute to the verdict.
+
+### Exit codes
+
+Exit **0** when a peer problem was found *and the alert was delivered* — reporting is the script doing its job, and a non-zero exit there would make `OnFailure=` fire a second, duplicate alert. Exit **1** only when the alert itself could not be sent. `OnFailure=` therefore covers precisely the cases the script cannot report on its own: a crash, a missing env file, a rejected push.
+
+### Known limitation
+
+Pi 1 hosts ntfy. If Pi 1 dies completely, Pi 2 detects it but cannot tell you, because the alert path runs through Pi 1. Degraded states and any Pi 2 failure are covered; total loss of Pi 1 needs an external check. This is named rather than papered over.
+
+### Files
+
+| File | Deploy to | Mode |
+|---|---|---|
+| `homelab-watchdog.sh` | `/usr/local/bin/homelab-watchdog.sh` | `0755` root:root |
+| `homelab-watchdog.service` | `/etc/systemd/system/` | `0644` |
+| `homelab-watchdog.timer` | `/etc/systemd/system/` | `0644` |
+| `homelab-watchdog.env.example` | `/etc/homelab-watchdog.env` | `0600` root:root |
+
+Each node's env file points at the **other** node. Credentials are reused from `/etc/ntfy-alert.env`.
+
+### Verify the alert path
+
+A watchdog that has never alerted is untested. Force a warning by raising the threshold above the real remaining days, then put it back:
+
+```bash
+sudo sed -i 's/^WARN_DAYS=.*/WARN_DAYS=200/' /etc/homelab-watchdog.env
+sudo systemctl start homelab-watchdog.service
+journalctl -t homelab-watchdog --no-pager --since "1 min ago" | tail -2
+sudo sed -i 's/^WARN_DAYS=.*/WARN_DAYS=21/' /etc/homelab-watchdog.env
+```
+
+Expect `N problem(s), alert pushed` and a push on the phone. Then enable:
+
+```bash
+sudo systemctl enable --now homelab-watchdog.timer
+systemctl list-timers | grep watchdog
+```

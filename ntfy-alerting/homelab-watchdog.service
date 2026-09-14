@@ -1,0 +1,8 @@
+[Unit]
+Description=Cross-node homelab watchdog (peer liveness, key and cert expiry)
+OnFailure=ntfy-alert@%N.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/local/bin/homelab-watchdog.sh
