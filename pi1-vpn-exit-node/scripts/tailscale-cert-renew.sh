@@ -7,7 +7,7 @@ set -euo pipefail
 HOSTNAME="<hostname>.<tailnet>.ts.net"
 CERT_DIR="/etc/tailscale/certs"
 COMPOSE="/home/YOUR_USERNAME/nextcloud/docker-compose.yml"
-NGINX_SVC="nginx"          # single container fronting :443 (NextCloud) and :8443 (ntfy)
+NGINX_SVC="nginx"          # single container fronting :443 (Nextcloud) and :8443 (ntfy)
 PORTS=(443 8443)           # both terminate with the same file cert
 # ---------------------------------------------------------------------------
 
@@ -38,6 +38,13 @@ fi
 
 # Verify every consumer against the on-disk cert; warn on any that lags.
 TS_IP=$(tailscale ip -4)
+# An empty TS_IP makes the connect string ":443", which openssl resolves to
+# loopback — reporting "unreachable" while the real cause is that tailscaled
+# was not ready. Seen after the 2026-09 tailscale upgrade restarted the daemon.
+if [ -z "$TS_IP" ]; then
+    log "ERROR: tailscale ip -4 returned nothing - cannot verify served certs"
+    exit 1
+fi
 file_end=$(openssl x509 -enddate -noout -in "$CRT" | cut -d= -f2)
 log "file notAfter=${file_end}"
 

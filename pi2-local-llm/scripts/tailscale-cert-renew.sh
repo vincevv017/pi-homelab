@@ -20,6 +20,8 @@ WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 cd "$WORK_DIR"
 
+# Self-throttling: real ACME renewal only inside the window, cached otherwise.
+# Also refreshes tailscaled's internal store -> the funnel's :$FUNNEL_PORT cert.
 tailscale cert "$HOSTNAME"
 
 if ! diff -q "${HOSTNAME}.crt" "$CRT" > /dev/null 2>&1; then
@@ -35,7 +37,15 @@ else
     log "file cert unchanged; no reload"
 fi
 
+# Verify both consumers; warn if the running funnel lags the file cert.
 TS_IP=$(tailscale ip -4)
+# An empty TS_IP makes the connect string ":443", which openssl resolves to
+# loopback — reporting "unreachable" while the real cause is that tailscaled
+# was not ready. Seen after the 2026-09 tailscale upgrade restarted the daemon.
+if [ -z "$TS_IP" ]; then
+    log "ERROR: tailscale ip -4 returned nothing - cannot verify served certs"
+    exit 1
+fi
 file_end=$(openssl x509 -enddate -noout -in "$CRT" | cut -d= -f2)
 fun_end=$(echo | openssl s_client -connect "${TS_IP}:${FUNNEL_PORT}" \
           -servername "$HOSTNAME" 2>/dev/null \
